@@ -50,6 +50,31 @@ enum Spelling<'i, 's> {
     Buffer { flags: u8, data: ptr::NonNull<u8>, _marker: PhantomData<&'s [u8]> },
 }
 
+pub struct Number<'i, 'a> {
+    #[allow(unused)] spelling: &'a [u8],
+    digits: *const u8,
+    suffix: *const u8,
+
+    radix: u8,
+    float: bool,
+    unsigned: bool,
+    size: Option<Size<'i>>,
+}
+
+#[derive(Copy, Clone)]
+pub enum Size<'i> { Long, LongLong, Size, Float, User(Symbol<'i, Kind>) }
+
+pub struct Character<'i, 'a> {
+    #[allow(unused)] spelling: &'a [u8],
+    encoding: Option<Encoding>,
+    multi: bool,
+    value: u64,
+    suffix: Option<Symbol<'i, Kind>>,
+}
+
+#[derive(Copy, Clone)]
+pub enum Encoding { Wide, Utf16, Utf32, Utf8 }
+
 const FLAG_SPLICE: u8 = 1 << 0;
 const FLAG_UCN: u8 = 1 << 1;
 
@@ -63,6 +88,13 @@ impl<'s> Tokens<'s> {
                 Some(Tokens { ptr, end, _marker: PhantomData })
             }
             _ => { None }
+        }
+    }
+
+    pub fn bytes(&self) -> &'s [u8] {
+        unsafe {
+            let len = self.end.offset_from(self.ptr) as usize - 1;
+            slice::from_raw_parts(self.ptr, len)
         }
     }
 
@@ -342,6 +374,22 @@ impl<'s> Tokens<'s> {
         }
     }
 
+    pub fn try_lparen(&mut self) -> Option<usize> {
+        unsafe {
+            let flags = &mut 0;
+
+            let ptr = if let (b'(', ptr) = byte(flags, self.ptr) {
+                ptr
+            } else {
+                return None;
+            };
+
+            let len = ptr.offset_from(self.ptr) as usize;
+            self.ptr = ptr;
+            Some(len)
+        }
+    }
+
     unsafe fn identifier<'i>(
         &mut self, flags: &mut u8, symbols: &'i SymbolMap<Kind>, scratch: &mut Vec<u8>,
         mut ptr: *const u8
@@ -593,11 +641,38 @@ unsafe fn try_ucn(flags: &mut u8, mut ptr: *const u8) -> Option<(char, *const u8
 }
 
 impl<'i, 's> Token<'i, 's> {
+    pub fn error(spelling: &'s [u8]) -> Token<'static, 's> {
+        let len = spelling.len();
+        let data = ptr::NonNull::from(spelling).cast();
+        let spelling = Spelling::Buffer { flags: 0, data, _marker: PhantomData };
+        Token { kind: Kind::Error, len, spelling }
+    }
+
+    pub fn end_of_line() -> Token<'static, 'static> {
+        let data = ptr::NonNull::dangling();
+        let spelling = Spelling::Buffer { flags: 0, data, _marker: PhantomData };
+        Token { kind: Kind::EndOfLine, len: 0, spelling }
+    }
+
+    pub fn end_of_file() -> Token<'static, 'static> {
+        let data = ptr::NonNull::dangling();
+        let spelling = Spelling::Buffer { flags: 0, data, _marker: PhantomData };
+        Token { kind: Kind::EndOfFile, len: 0, spelling }
+    }
+
     #[inline]
     pub fn kind(&self) -> Kind { self.kind }
 
     #[inline]
     pub fn len(&self) -> usize { self.len }
+
+    #[inline]
+    pub fn ident(&self) -> Symbol<'i, Kind> {
+        match self.spelling {
+            Spelling::Intern(ident) => { ident }
+            _ => { unreachable!() }
+        }
+    }
 
     /// Obtain a clean version of this token's spelling. Opportunistically reuse the source buffer.
     pub fn spelling<'a>(&self, scratch: &'a mut Vec<u8>) -> &'a [u8] where 'i: 'a, 's: 'a {
@@ -631,6 +706,325 @@ impl<'i, 's> Token<'i, 's> {
             let raw = slice::from_raw_parts(data.as_ptr() as *const _, self.len);
             (clean, raw)
         }
+    }
+
+    fn spelling_padded<'a>(&self, scratch: &'a mut Vec<u8>) -> &'a [u8] where 's: 'a {
+        unsafe {
+            let (flags, data) = match self.spelling {
+                Spelling::Intern(_) => { unreachable!() }
+                Spelling::Buffer { flags, data, .. } => { (flags, data) }
+            };
+            let clean = (flags & FLAG_SPLICE) == 0 && (flags & FLAG_UCN) == 0;
+            let raw = slice::from_raw_parts(data.as_ptr() as *const _, self.len);
+            if clean { return raw; }
+
+            let Range { start: ptr, end } = raw.as_ptr_range();
+            scratch.clear();
+            scratch.reserve(self.len);
+            clean_spelling(scratch, self.kind, ptr, end);
+            scratch.extend_from_slice(b"\0\0\0");
+            &scratch[..scratch.len() - 3]
+        }
+    }
+
+    pub fn number<'a>(
+        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+    ) -> Option<Number<'i, 'a>> where 's: 'a {
+        if self.kind != Kind::Number { unreachable!() }
+        unsafe {
+            let spelling = self.spelling_padded(buf);
+            let Range { start: ptr, end } = spelling.as_ptr_range();
+
+            let mut digits = ptr;
+            let mut period = false;
+            let mut exponent = false;
+            let (mut radix, mut ptr) = match (*ptr, ptr.offset(1)) {
+                (b'0', ptr) => match (*ptr, ptr.offset(1)) {
+                    (b'x' | b'X', ptr) if hex(*ptr) || *ptr == b'.' => {
+                        let mut has_digits = false;
+
+                        digits = ptr;
+                        let mut ptr = skip(hex, ptr);
+                        has_digits |= digits != ptr;
+
+                        if let (b'.', end) = (*ptr, ptr.offset(1)) {
+                            ptr = end;
+
+                            period = true;
+                            ptr = skip(hex, ptr);
+                            has_digits |= end != ptr;
+                        }
+
+                        if !has_digits {
+                            return None;
+                        }
+
+                        if let (b'p' | b'P', end) = (*ptr, ptr.offset(1)) {
+                            ptr = end;
+
+                            exponent = true;
+                            if let (b'+' | b'-', end) = (*ptr, ptr.offset(1)) { ptr = end; }
+                            let end = skip(dec, ptr);
+                            if ptr == end { /* error */ }
+                            ptr = end;
+                        } else if period {
+                            return None;
+                        }
+
+                        (16, ptr)
+                    }
+                    (b'b' | b'B', ptr) if bin(*ptr) => {
+                        digits = ptr;
+                        let ptr = skip(bin, ptr);
+
+                        (2, ptr)
+                    }
+                    _ => {
+                        let mut radix = 8;
+
+                        let mut ptr = skip(oct, ptr);
+                        if dec(*ptr) {
+                            let end = skip(dec, ptr);
+                            if let b'.' | b'e' | b'E' = *end {
+                                ptr = end;
+
+                                radix = 10;
+                            }
+                        }
+
+                        (radix, ptr)
+                    }
+                }
+                _ => {
+                    let ptr = skip(dec, ptr);
+
+                    (10, ptr)
+                }
+            };
+            if radix == 8 || radix == 10 {
+                if let (b'.', end) = (*ptr, ptr.offset(1)) {
+                    ptr = end;
+
+                    period = true;
+                    radix = 10;
+                    ptr = skip(dec, ptr);
+                }
+
+                if let (b'e' | b'E', end) = (*ptr, ptr.offset(1)) {
+                    ptr = end;
+
+                    exponent = true;
+                    radix = 10;
+                    if let (b'+' | b'-', end) = (*ptr, ptr.offset(1)) { ptr = end; }
+                    let end = skip(dec, ptr);
+                    if ptr == end {
+                        /* error */
+                    }
+                    ptr = end;
+                }
+            }
+
+            let suffix = ptr;
+            let float = period || exponent;
+            let mut unsigned = false;
+            let mut size = None;
+            while ptr != end {
+                ptr = match (*ptr, ptr.offset(1)) {
+                    (b'u' | b'U', p) if !unsigned && !float => { unsigned = true; p }
+                    (l @ b'l' | l @ b'L', p) if size.is_none() => match (*p, p.offset(1)) {
+                        (b, ptr) if l == b && !float => { size = Some(Size::LongLong); ptr }
+                        _ => { size = Some(Size::Long); p }
+                    }
+                    (b'z' | b'Z', p) if size.is_none() && !float => { size = Some(Size::Size); p }
+                    (b'f' | b'F', p) if size.is_none() && float => { size = Some(Size::Float); p }
+                    _ => { break; }
+                };
+            }
+            if ptr == end {
+                return Some(Number { spelling, digits, suffix, radix, float, unsigned, size });
+            }
+
+            ptr = match try_ud_suffix(&mut 0, suffix) {
+                Some(ptr) => { ptr }
+                None => { suffix }
+            };
+            if ptr == end {
+                let slice = slice::from_raw_parts(suffix, ptr.offset_from(suffix) as usize);
+                let ident = symbols.intern(slice, Kind::Identifier);
+                size = Some(Size::User(ident));
+                return Some(Number { spelling, digits, suffix, radix, float, unsigned, size });
+            }
+
+            None
+        }
+    }
+
+    pub fn character<'a>(
+        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+    ) -> Option<Character<'i, 'a>> where 's: 'a {
+        unsafe {
+            let spelling = self.spelling_padded(buf);
+            let Range { start: ptr, end } = spelling.as_ptr_range();
+
+            let (encoding, mut ptr) = match (*ptr, ptr.offset(1)) {
+                (b'L', ptr) => { (Some(Encoding::Wide), ptr) }
+                (b'u', ptr) => match (*ptr, ptr.offset(1)) {
+                    (b'8', ptr) => { (Some(Encoding::Utf8), ptr) }
+                    _ => { (Some(Encoding::Utf16), ptr) }
+                }
+                (b'U', ptr) => { (Some(Encoding::Utf32), ptr) }
+                _ => { (None, ptr) }
+            };
+            let max = match encoding {
+                None => { 0x7F }
+                Some(Encoding::Wide) => { 0xFFFF }
+                Some(Encoding::Utf16) => { 0xFFFF }
+                Some(Encoding::Utf32) => { 0xFFFF }
+                Some(Encoding::Utf8) => { 0x7F }
+            };
+            ptr = ptr.offset(1);
+
+            let mut value = 0;
+            let mut count = 0;
+            loop {
+                let mut c = 0;
+                ptr = match (*ptr, ptr.offset(1)) {
+                    (b'\\', ptr) => match (*ptr, ptr.offset(1)) {
+                        (b @ b'\'' | b @ b'"' | b @ b'?' | b @ b'\\', end) => { c = b as u64; end }
+                        (b'a', end) => { c = b'\x07' as u64; end }
+                        (b'b', end) => { c = b'\x08' as u64; end }
+                        (b'f', end) => { c = b'\x0C' as u64; end }
+                        (b'n', end) => { c = b'\n' as u64; end }
+                        (b'r', end) => { c = b'\r' as u64; end }
+                        (b't', end) => { c = b'\t' as u64; end }
+                        (b'v', end) => { c = b'\x0B' as u64; end }
+                        (b'x', mut end) => loop {
+                            if !hex(*end) { break end; }
+                            c = c << 4 | hex_value(*end) as u64;
+                            end = end.offset(1);
+                        }
+                        (b'0'..=b'7', mut end) => loop {
+                            if end.offset_from(ptr) == 3 { break end; }
+                            if !oct(*end) { break end; }
+                            c = c << 3 | (*ptr - b'0') as u64;
+                            end = end.offset(1);
+                        }
+                        (b, end) => {
+                            // error
+                            c = b as u64;
+                            end
+                        }
+                    }
+                    (b'\'', _) => { break; }
+                    (0x80.., ptr) => match try_utf8(ptr) {
+                        Some((b, ptr)) => { c = b as u64; ptr }
+                        _ => { ptr }
+                    }
+                    (b, ptr) => { c = b as u64; ptr }
+                };
+
+                if c > max {
+                    // error
+                    continue;
+                }
+                value = match encoding {
+                    None => { value << 8 | c }
+                    _ => { c }
+                };
+                count += 1;
+            }
+            let multi = count > 1;
+            match encoding {
+                None if !multi && value > 0x7F => { value = value as i8 as u64; }
+                _ => {}
+            }
+
+            ptr = ptr.offset(1);
+            if ptr == end {
+                return Some(Character { spelling, encoding, multi, value, suffix: None });
+            }
+
+            let suffix = ptr;
+            ptr = match try_ud_suffix(&mut 0, suffix) {
+                Some(ptr) => { ptr }
+                None => { suffix }
+            };
+            if ptr == end {
+                let slice = slice::from_raw_parts(suffix, ptr.offset_from(suffix) as usize);
+                let ident = symbols.intern(slice, Kind::Identifier);
+                return Some(Character { spelling, encoding, multi, value, suffix: Some(ident) });
+            }
+
+            None
+        }
+    }
+}
+
+fn hex(b: u8) -> bool { match b { b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => true, _ => false } }
+fn dec(b: u8) -> bool { match b { b'0'..=b'9' => true, _ => false } }
+fn oct(b: u8) -> bool { match b { b'0'..=b'7' => true, _ => false } }
+fn bin(b: u8) -> bool { match b { b'0'..=b'1' => true, _ => false } }
+unsafe fn skip<P: Fn(u8) -> bool>(p: P, mut ptr: *const u8) -> *const u8 {
+    while p(*ptr) {
+        ptr = ptr.offset(1);
+        if *ptr == b'\'' && p(*ptr.offset(1)) { ptr = ptr.offset(2); }
+    }
+    ptr
+}
+
+impl<'i, 'a> Number<'i, 'a> {
+    #[inline]
+    pub fn float(&self) -> bool { self.float }
+
+    #[inline]
+    pub fn unsigned(&self) -> bool { self.unsigned }
+
+    #[inline]
+    pub fn size(&self) -> Option<Size> { self.size }
+
+    pub fn integer_value(&self, max: u64) -> (bool, u64) {
+        let Number { digits, suffix, radix, .. } = *self;
+        if self.float { unreachable!() }
+        unsafe {
+            let mut value = 0u64;
+            let mut error = false;
+            let mut overflow;
+            let digits = slice::from_raw_parts(digits, suffix.offset_from(digits) as usize);
+            for &d in digits {
+                if d == b'\'' { continue; }
+                let d = hex_value(d);
+
+                (value, overflow) = value.overflowing_mul(radix as u64);
+                if overflow || value > max { error = true; }
+
+                (value, overflow) = value.overflowing_add(d as u64);
+                if overflow || value > max { error = true; }
+            }
+            (error, value & max)
+        }
+    }
+}
+
+impl<'i, 'a> Character<'i, 'a> {
+    #[inline]
+    pub fn encoding(&self) -> Option<Encoding> { self.encoding }
+
+    #[inline]
+    pub fn multi(&self) -> bool { self.multi }
+
+    #[inline]
+    pub fn value(&self) -> u64 { self.value }
+
+    #[inline]
+    pub fn suffix(&self) -> Option<Symbol<'i, Kind>> { self.suffix }
+}
+
+fn hex_value(d: u8) -> u8 {
+    d - match d {
+        b'0'..=b'9' => { b'0' }
+        b'a'..=b'f' => { b'a' }
+        b'A'..=b'F' => { b'A' }
+        _ => { unreachable!() }
     }
 }
 
