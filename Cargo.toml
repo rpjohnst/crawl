@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 quickdry = "0.1.2"
+indexmap = "1.9.2"
