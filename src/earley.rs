@@ -1,14 +1,6 @@
 use std::{iter, mem};
 use std::collections::HashSet;
-
-/// A context free grammar. Rules `r` is stored as `lefts[r] -> words[rules[r + 0]..rules[r + 1]]`.
-pub struct Grammar<'g> {
-    pub terminals: usize,
-    pub variables: usize,
-    pub lefts: &'g [usize],
-    pub rules: &'g [usize],
-    pub words: &'g [usize],
-}
+use crate::grammar::Grammar;
 
 /// A compiled form of a context free grammar, for use by an Earley parser.
 ///
