@@ -1,5 +1,5 @@
 use std::{iter, mem};
-use std::collections::HashSet;
+use indexmap::{IndexMap, map::Entry};
 use crate::grammar::Grammar;
 
 /// A compiled form of a context free grammar, for use by an Earley parser.
@@ -83,25 +83,35 @@ impl Analysis {
 pub struct Parse<'a> {
     analysis: &'a Analysis,
 
-    sets: Vec<usize>,
-    items: Vec<(usize, usize)>,
+    // Transient data produced for each set.
+    // Earley items are augmented with left and right child nodes, one per derivation.
+    // They are grouped (and counted) by the eventual parent SPPF node for those children.
+    calls: Vec<usize>,
+    kinds: IndexMap<(usize, usize), usize>,
+    items: Vec<(usize, usize, usize, usize)>,
 
-    hash: HashSet<(usize, usize)>,
+    // Finalized tree nodes, named either `(!s, start)` or `(slot, start)`.
+    // Nodes completed in set `i` are in `nodes[sets[i + 0]..sets[i + 1]]`.
+    // Each node `n` has a set of child pairs in `packs[nodes[n + 0]..nodes[n + 1]]`.
+    pub sets: Vec<usize>,
+    pub nodes: Vec<(usize, usize, usize)>,
+    pub packs: Vec<(usize, usize)>,
 }
 
 impl<'a> Parse<'a> {
     pub fn from_analysis(analysis: &'a Analysis) -> Parse<'a> {
-        let sets = Vec::default();
+        let calls = Vec::default();
+        let kinds = IndexMap::default();
         let items = Vec::default();
-        let hash = HashSet::default();
-        let mut parse = Parse { analysis, sets, items, hash };
+        let sets = Vec::default();
+        let nodes = Vec::default();
+        let packs = Vec::default();
+        let mut parse = Parse { analysis, calls, kinds, items, sets, nodes, packs };
 
         let Parse { ref mut items, ref mut sets, .. } = parse;
         let &Analysis { terminals, .. } = analysis;
 
-        let set = sets.len();
-        sets.push(items.len());
-        items.push((terminals, set));
+        items.push((terminals, sets.len(), !0, !0));
         parse.epsilon();
 
         parse
@@ -111,40 +121,87 @@ impl<'a> Parse<'a> {
         let &mut Parse { ref mut items, ref mut sets, .. } = self;
 
         // Scan.
-        let set = sets.len();
-        sets.push(items.len());
-        items.push((t, set - 1));
+        items.push((t, sets.len() - 1, !0, !0));
         self.epsilon();
     }
 
     fn epsilon(&mut self) {
-        let &mut Parse { analysis, ref mut sets, ref mut items, ref mut hash, .. } = self;
+        let &mut Parse {
+            analysis, ref mut calls, ref mut kinds, ref mut items,
+            ref mut sets, ref mut nodes, ref mut packs, ..
+        } = self;
         let &Analysis { terminals, ref nulls, ref edges, ref rules, ref slots, .. } = analysis;
 
-        let set = sets.len() - 1;
-        for item in sets[set].. {
-            let Some(&(slot, start)) = items.get(item) else { break };
+        let set = sets.len();
+        sets.push(nodes.len());
+
+        // Process all items in the current set.
+        for item in 0.. {
+            let Some(&(slot, start, _, _)) = items.get(item) else { break };
             if (edges[slot] as isize) < 0 {
                 // Completions.
                 let s = !edges[slot];
-                if !hash.insert((!s, start)) { continue; }
+                let (j, true) = Self::pack(kinds, (!s, start)) else { continue };
                 if start == set { continue; }
                 for i in sets[start + 0]..sets[start + 1] {
-                    let (slot, start) = items[i];
+                    let (slot, start, _) = nodes[i];
                     if (slot as isize) < 0 { continue; }
-                    if edges[slot] == s { items.push((slot + 1, start)); }
+                    if edges[slot] == s {
+                        items.push((slot + 1, start, i, nodes.len() + j));
+                    }
                 }
             } else {
                 // Predictions.
                 let s = edges[slot];
+                let (i, _) = Self::pack(kinds, (slot, start));
                 if s < terminals { continue; }
-                if nulls[s] { items.push((slot + 1, start)); }
-                if !hash.insert((s, 0)) { continue; }
-                for &slot in &slots[rules[s + 0]..rules[s + 1]] { items.push((slot, set)); }
+                if nulls[s] {
+                    let (j, _, _) = or_insert_full(kinds.entry((!s, set)), 0);
+                    items.push((slot + 1, start, nodes.len() + i, nodes.len() + j));
+                }
+                if calls.contains(&s) { continue; }
+                calls.push(s);
+                for &slot in &slots[rules[s + 0]..rules[s + 1]] {
+                    items.push((slot, set, !0, !0));
+                }
             }
         }
 
-        hash.clear();
+        // Create nodes and allocate indices for their child pairs.
+        nodes.reserve(kinds.len());
+        let mut sum = packs.len();
+        for (&(s, start), count) in kinds.iter_mut() {
+            nodes.push((s, start, sum));
+            sum += mem::replace(count, sum);
+        }
+
+        // Move child pairs from items into their parent nodes.
+        let old = packs.len();
+        packs.resize(packs.len() + items.len(), (0, 0));
+        for &(slot, start, i, j) in &items[..] {
+            let s = if (edges[slot] as isize) < 0 { edges[slot] } else { slot };
+            let p = &mut kinds[&(s, start)];
+            packs[mem::replace(p, *p + 1)] = (i, j);
+        }
+        debug_assert!(!packs[old..].iter().any(|&(i, j)| (i, j) == (0, 0)));
+
+        calls.clear();
+        kinds.clear();
+        items.clear();
+    }
+
+    /// Count an Earley item towards its parent group.
+    fn pack(kinds: &mut IndexMap<(usize, usize), usize>, label: (usize, usize)) -> (usize, bool) {
+        let (j, inserted, count) = or_insert_full(kinds.entry(label), 0);
+        *count += 1;
+        (j, inserted)
+    }
+}
+
+fn or_insert_full<K, V>(entry: Entry<'_, K, V>, default: V) -> (usize, bool, &'_ mut V) {
+    match entry {
+        Entry::Occupied(entry) => { (entry.index(), false, entry.into_mut()) }
+        Entry::Vacant(entry) => { (entry.index(), true, entry.insert(default) ) }
     }
 }
 
@@ -152,7 +209,7 @@ impl<'a> Parse<'a> {
 mod tests {
     use super::{Grammar, Analysis, Parse};
 
-    /// Simple "S l o g" grammar: `S -> eps | o | S o | S < o >`.
+    /// Simple "S l o g" grammar: `S -> eps | o | S o | S < S >`.
     static GRAMMAR: Grammar<'_> = Grammar {
         terminals: 3,
         variables: 1,
@@ -167,17 +224,48 @@ mod tests {
 
     #[test]
     fn slog() {
-        // Recognize the input `o o < o < o > >`.
+        // Parse the input `o o < o < o > >`.
         let analysis = Analysis::from_grammar(&GRAMMAR);
         let mut parse = Parse::from_analysis(&analysis);
         for &s in &[0, 0, 1, 0, 1, 0, 2, 2] { parse.parse(s); }
 
-        let Parse { analysis, ref sets, ref items, .. } = parse;
+        let Parse { analysis, ref sets, ref nodes, ref packs, .. } = parse;
         let &Analysis { terminals, .. } = analysis;
 
         // The final set should contain an item for a completed `S` rule covering the full input.
-        items[sets[8]..].iter()
-            .position(|&(slot, start)| (slot, start) == (terminals + 1, 0))
+        let s = sets[8] + nodes[sets[8]..].iter()
+            .position(|&(slot, start, _)| (slot, start) == (!terminals, 0))
             .expect("completed start symbol");
+
+        let [(k, l)] = packs[nodes[s + 0].2..nodes[s + 1].2] else { panic!("ambiguous") };
+        let [(j, k)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
+        let [(i, j)] = packs[nodes[j + 0].2..nodes[j + 1].2] else { panic!("ambiguous") };
+        let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
+
+        assert_eq!((nodes[i].0, nodes[i].1), (!3, 0));
+        {
+            let [(i, j)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
+            let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
+
+            assert_eq!((nodes[i].0, nodes[i].1), (!3, 0));
+            assert_eq!((nodes[j].0, nodes[j].1), (!0, 1));
+        }
+
+        assert_eq!((nodes[j].0, nodes[j].1), (!1, 2));
+
+        assert_eq!((nodes[k].0, nodes[k].1), (!3, 3));
+        {
+            let [(k, l)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
+            let [(j, k)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
+            let [(i, j)] = packs[nodes[j + 0].2..nodes[j + 1].2] else { panic!("ambiguous") };
+            let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
+
+            assert_eq!((nodes[i].0, nodes[i].1), (!3, 3));
+            assert_eq!((nodes[j].0, nodes[j].1), (!1, 4));
+            assert_eq!((nodes[k].0, nodes[k].1), (!3, 5));
+            assert_eq!((nodes[l].0, nodes[l].1), (!2, 6));
+        }
+
+        assert_eq!((nodes[l].0, nodes[l].1), (!2, 7));
     }
 }
