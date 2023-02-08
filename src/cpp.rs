@@ -1297,33 +1297,35 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{ptr, slice};
-    use std::alloc::{Layout, handle_alloc_error};
-    use crate::lex;
-    use crate::symbols::SymbolMap;
-    use super::{Preprocessor, Source};
+/// Simple [`Source`] implementation primarily for testing.
+#[derive(Default)]
+pub struct ScratchBuffers { arena: quickdry::Arena }
 
-    #[derive(Default)]
-    struct Buffers { arena: quickdry::Arena }
+impl Source for ScratchBuffers {
+    fn lexer_for_header(&self, _: bool, _: &[u8]) -> Option<lex::Tokens<'_>> { None }
+    fn lexer_for_buffer(&self, buffer: &[u8]) -> lex::Tokens<'_> {
+        use std::{ptr, slice};
+        use std::alloc::{Layout, handle_alloc_error};
 
-    impl Source for Buffers {
-        fn lexer_for_header(&self, _: bool, _: &[u8]) -> Option<lex::Tokens<'_>> { None }
-        fn lexer_for_buffer(&self, buffer: &[u8]) -> lex::Tokens<'_> {
-            unsafe {
-                let layout = Layout::from_size_align_unchecked(buffer.len() + 3, 1);
-                let data = self.arena.alloc(layout);
-                if data == ptr::null_mut() { handle_alloc_error(layout); }
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(buffer.len() + 3, 1);
+            let data = self.arena.alloc(layout);
+            if data == ptr::null_mut() { handle_alloc_error(layout); }
 
-                ptr::copy_nonoverlapping(buffer.as_ptr(), data, buffer.len());
-                ptr::write_bytes(data.add(buffer.len()), 0, 3);
+            ptr::copy_nonoverlapping(buffer.as_ptr(), data, buffer.len());
+            ptr::write_bytes(data.add(buffer.len()), 0, 3);
 
-                let bytes = slice::from_raw_parts(data, buffer.len() + 3);
-                lex::Tokens::from_bytes_with_padding(bytes).unwrap()
-            }
+            let bytes = slice::from_raw_parts(data, buffer.len() + 3);
+            lex::Tokens::from_bytes_with_padding(bytes).unwrap()
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lex;
+    use crate::symbols::SymbolMap;
+    use super::{Preprocessor, ScratchBuffers};
 
     #[test]
     fn hello() {
@@ -1336,7 +1338,7 @@ if (x < 3) {
 }
 \0\0\0").unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1381,7 +1383,7 @@ ghi
 #endif
 \0\0\0").unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1416,7 +1418,7 @@ int w = FN1(OBJ1, FN0(OBJ0));
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1506,7 +1508,7 @@ int x = F(LPAREN(), 0, <:-);    // replaced by int x = 42;
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1542,7 +1544,7 @@ report(x>y, \"x is %d but y is %d\", x, y);
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1652,7 +1654,7 @@ H5C(H5A())          // replaced by ab
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1775,7 +1777,7 @@ xglue(HIGH, LOW)
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -1850,7 +1852,7 @@ char c[2][6] = { str(hello), str() };
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
@@ -2041,7 +2043,7 @@ J;
 \0\0\0"
         ).unwrap();
 
-        let source = &Buffers::default();
+        let source = &ScratchBuffers::default();
         let cpp = &mut Preprocessor::new(symbols, source);
         let tokens = &mut cpp.tokens(tokens);
 
