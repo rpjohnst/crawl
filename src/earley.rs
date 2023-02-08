@@ -178,7 +178,28 @@ impl<'a> Parse<'a> {
         // Move child pairs from items into their parent nodes.
         let old = packs.len();
         packs.resize(packs.len() + items.len(), (0, 0));
-        for &(slot, start, i, j) in &items[..] {
+        for &(slot, start, mut i, j) in &items[..] {
+            const NULL: usize = !0;
+
+            // TODO: This simplification is at least localized here, but it is still a bit messy.
+
+            // Simplify left children: point to `x` instead of `A -> x . ys`.
+            if i != NULL {
+                let (islot, istart, ip) = nodes[i];
+                if islot < 1 || (edges[islot - 1] as isize) < 0 {
+                    i = NULL;
+                } else if islot < 2 || (edges[islot - 2] as isize) < 0 {
+                    i = if istart < set {
+                        let (_, _, iq) = nodes[i + 1];
+                        let [(NULL, j)] = packs[ip..iq] else { unreachable!() };
+                        j
+                    } else {
+                        let i = kinds.get_index_of(&(!edges[islot - 1], set)).unwrap();
+                        nodes.len() - kinds.len() + i
+                    };
+                }
+            }
+
             let s = if (edges[slot] as isize) < 0 { edges[slot] } else { slot };
             let p = &mut kinds[&(s, start)];
             packs[mem::replace(p, *p + 1)] = (i, j);
@@ -240,12 +261,10 @@ mod tests {
         let [(k, l)] = packs[nodes[s + 0].2..nodes[s + 1].2] else { panic!("ambiguous") };
         let [(j, k)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
         let [(i, j)] = packs[nodes[j + 0].2..nodes[j + 1].2] else { panic!("ambiguous") };
-        let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
 
         assert_eq!((nodes[i].0, nodes[i].1), (!3, 0));
         {
             let [(i, j)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
-            let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
 
             assert_eq!((nodes[i].0, nodes[i].1), (!3, 0));
             assert_eq!((nodes[j].0, nodes[j].1), (!0, 1));
@@ -258,7 +277,6 @@ mod tests {
             let [(k, l)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
             let [(j, k)] = packs[nodes[k + 0].2..nodes[k + 1].2] else { panic!("ambiguous") };
             let [(i, j)] = packs[nodes[j + 0].2..nodes[j + 1].2] else { panic!("ambiguous") };
-            let [(_, i)] = packs[nodes[i + 0].2..nodes[i + 1].2] else { panic!("ambiguous") };
 
             assert_eq!((nodes[i].0, nodes[i].1), (!3, 3));
             assert_eq!((nodes[j].0, nodes[j].1), (!1, 4));
