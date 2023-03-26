@@ -431,18 +431,20 @@ impl<'i, 's> Tokens<'i, 's> {
                 Value { unsigned, value }
             }
             lex::Kind::Character => {
-                let character = match token.token.character(symbols, &mut self.scratch) {
-                    Some(character) => { character }
-                    None => {
-                        self.discard_directive(cpp, symbols);
-                        return None;
-                    }
-                };
+                let character = token.token.character(symbols, &mut self.scratch);
+                let (encoding, multi, value) = character.value();
+                if multi {
+                }
                 if let Some(_) = character.suffix() {
                 }
 
-                let unsigned = character.encoding().is_some();
-                let value = character.value();
+                let unsigned = match encoding {
+                    Some(
+                        lex::Encoding::Wide |
+                        lex::Encoding::Utf8 | lex::Encoding::Utf16 | lex::Encoding::Utf32
+                    ) => { true }
+                    None => { false }
+                };
 
                 *token = self.expanded_token(cpp, symbols, true);
                 Value { unsigned, value }
