@@ -66,9 +66,11 @@ pub enum Size<'i> { Long, LongLong, Size, Float, User(Symbol<'i, Kind>) }
 
 pub struct Character<'i, 'a> {
     #[allow(unused)] spelling: &'a [u8],
-    encoding: Option<Encoding>,
-    multi: bool,
-    value: u64,
+    suffix: Option<Symbol<'i, Kind>>,
+}
+
+pub struct String<'i, 'a> {
+    #[allow(unused)] spelling: &'a [u8],
     suffix: Option<Symbol<'i, Kind>>,
 }
 
@@ -708,31 +710,12 @@ impl<'i, 's> Token<'i, 's> {
         }
     }
 
-    fn spelling_padded<'a>(&self, scratch: &'a mut Vec<u8>) -> &'a [u8] where 's: 'a {
-        unsafe {
-            let (flags, data) = match self.spelling {
-                Spelling::Intern(_) => { unreachable!() }
-                Spelling::Buffer { flags, data, .. } => { (flags, data) }
-            };
-            let clean = (flags & FLAG_SPLICE) == 0 && (flags & FLAG_UCN) == 0;
-            let raw = slice::from_raw_parts(data.as_ptr() as *const _, self.len);
-            if clean { return raw; }
-
-            let Range { start: ptr, end } = raw.as_ptr_range();
-            scratch.clear();
-            scratch.reserve(self.len);
-            clean_spelling(scratch, self.kind, ptr, end);
-            scratch.extend_from_slice(b"\0\0\0");
-            &scratch[..scratch.len() - 3]
-        }
-    }
-
     pub fn number<'a>(
         &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
-    ) -> Option<Number<'i, 'a>> where 's: 'a {
+    ) -> Option<Number<'i, 'a>> where 'i: 'a, 's: 'a {
         if self.kind != Kind::Number { unreachable!() }
         unsafe {
-            let spelling = self.spelling_padded(buf);
+            let spelling = self.spelling(buf);
             let Range { start: ptr, end } = spelling.as_ptr_range();
 
             let mut digits = ptr;
@@ -744,14 +727,14 @@ impl<'i, 's> Token<'i, 's> {
                         let mut has_digits = false;
 
                         digits = ptr;
-                        let mut ptr = skip(hex, ptr);
+                        let mut ptr = skip_digits(hex, ptr);
                         has_digits |= digits != ptr;
 
                         if let (b'.', end) = (*ptr, ptr.offset(1)) {
                             ptr = end;
 
                             period = true;
-                            ptr = skip(hex, ptr);
+                            ptr = skip_digits(hex, ptr);
                             has_digits |= end != ptr;
                         }
 
@@ -764,8 +747,10 @@ impl<'i, 's> Token<'i, 's> {
 
                             exponent = true;
                             if let (b'+' | b'-', end) = (*ptr, ptr.offset(1)) { ptr = end; }
-                            let end = skip(dec, ptr);
-                            if ptr == end { /* error */ }
+                            let end = skip_digits(dec, ptr);
+                            if ptr == end {
+                                return None;
+                            }
                             ptr = end;
                         } else if period {
                             return None;
@@ -775,16 +760,16 @@ impl<'i, 's> Token<'i, 's> {
                     }
                     (b'b' | b'B', ptr) if bin(*ptr) => {
                         digits = ptr;
-                        let ptr = skip(bin, ptr);
+                        let ptr = skip_digits(bin, ptr);
 
                         (2, ptr)
                     }
                     _ => {
                         let mut radix = 8;
 
-                        let mut ptr = skip(oct, ptr);
+                        let mut ptr = skip_digits(oct, ptr);
                         if dec(*ptr) {
-                            let end = skip(dec, ptr);
+                            let end = skip_digits(dec, ptr);
                             if let b'.' | b'e' | b'E' = *end {
                                 ptr = end;
 
@@ -796,7 +781,7 @@ impl<'i, 's> Token<'i, 's> {
                     }
                 }
                 _ => {
-                    let ptr = skip(dec, ptr);
+                    let ptr = skip_digits(dec, ptr);
 
                     (10, ptr)
                 }
@@ -807,7 +792,7 @@ impl<'i, 's> Token<'i, 's> {
 
                     period = true;
                     radix = 10;
-                    ptr = skip(dec, ptr);
+                    ptr = skip_digits(dec, ptr);
                 }
 
                 if let (b'e' | b'E', end) = (*ptr, ptr.offset(1)) {
@@ -816,9 +801,9 @@ impl<'i, 's> Token<'i, 's> {
                     exponent = true;
                     radix = 10;
                     if let (b'+' | b'-', end) = (*ptr, ptr.offset(1)) { ptr = end; }
-                    let end = skip(dec, ptr);
+                    let end = skip_digits(dec, ptr);
                     if ptr == end {
-                        /* error */
+                        return None;
                     }
                     ptr = end;
                 }
@@ -844,10 +829,12 @@ impl<'i, 's> Token<'i, 's> {
                 return Some(Number { spelling, digits, suffix, radix, float, unsigned, size });
             }
 
-            ptr = match try_ud_suffix(&mut 0, suffix) {
-                Some(ptr) => { ptr }
-                None => { suffix }
-            };
+            while ptr != end {
+                ptr = match (*ptr, ptr.offset(1)) {
+                    (b'\'' | b'+' | b'-' | b'.', _) => { break; }
+                    (_, p) => { p }
+                };
+            }
             if ptr == end {
                 let slice = slice::from_raw_parts(suffix, ptr.offset_from(suffix) as usize);
                 let ident = symbols.intern(slice, Kind::Identifier);
@@ -861,101 +848,45 @@ impl<'i, 's> Token<'i, 's> {
 
     pub fn character<'a>(
         &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
-    ) -> Option<Character<'i, 'a>> where 's: 'a {
+    ) -> Character<'i, 'a> where 'i: 'a, 's: 'a {
+        if self.kind != Kind::Character { unreachable!() }
         unsafe {
-            let spelling = self.spelling_padded(buf);
-            let Range { start: ptr, end } = spelling.as_ptr_range();
+            let (spelling, suffix) = self.quoted(symbols, buf, b'\'');
+            Character { spelling, suffix }
+        }
+    }
 
-            let (encoding, mut ptr) = match (*ptr, ptr.offset(1)) {
-                (b'L', ptr) => { (Some(Encoding::Wide), ptr) }
-                (b'u', ptr) => match (*ptr, ptr.offset(1)) {
-                    (b'8', ptr) => { (Some(Encoding::Utf8), ptr) }
-                    _ => { (Some(Encoding::Utf16), ptr) }
-                }
-                (b'U', ptr) => { (Some(Encoding::Utf32), ptr) }
-                _ => { (None, ptr) }
-            };
-            let max = match encoding {
-                None => { 0x7F }
-                Some(Encoding::Wide) => { 0xFFFF }
-                Some(Encoding::Utf16) => { 0xFFFF }
-                Some(Encoding::Utf32) => { 0xFFFF }
-                Some(Encoding::Utf8) => { 0x7F }
-            };
-            ptr = ptr.offset(1);
+    pub fn string<'a>(
+        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+    ) -> String<'i, 'a> where 'i: 'a, 's: 'a {
+        if self.kind != Kind::String { unreachable!() }
+        unsafe {
+            let (spelling, suffix) = self.quoted(symbols, buf, b'"');
+            String { spelling, suffix }
+        }
+    }
 
-            let mut value = 0;
-            let mut count = 0;
-            loop {
-                let mut c = 0;
-                ptr = match (*ptr, ptr.offset(1)) {
-                    (b'\\', ptr) => match (*ptr, ptr.offset(1)) {
-                        (b @ b'\'' | b @ b'"' | b @ b'?' | b @ b'\\', end) => { c = b as u64; end }
-                        (b'a', end) => { c = b'\x07' as u64; end }
-                        (b'b', end) => { c = b'\x08' as u64; end }
-                        (b'f', end) => { c = b'\x0C' as u64; end }
-                        (b'n', end) => { c = b'\n' as u64; end }
-                        (b'r', end) => { c = b'\r' as u64; end }
-                        (b't', end) => { c = b'\t' as u64; end }
-                        (b'v', end) => { c = b'\x0B' as u64; end }
-                        (b'x', mut end) => loop {
-                            if !hex(*end) { break end; }
-                            c = c << 4 | hex_value(*end) as u64;
-                            end = end.offset(1);
-                        }
-                        (b'0'..=b'7', mut end) => loop {
-                            if end.offset_from(ptr) == 3 { break end; }
-                            if !oct(*end) { break end; }
-                            c = c << 3 | (*ptr - b'0') as u64;
-                            end = end.offset(1);
-                        }
-                        (b, end) => {
-                            // error
-                            c = b as u64;
-                            end
-                        }
-                    }
-                    (b'\'', _) => { break; }
-                    (0x80.., ptr) => match try_utf8(ptr) {
-                        Some((b, ptr)) => { c = b as u64; ptr }
-                        _ => { ptr }
-                    }
-                    (b, ptr) => { c = b as u64; ptr }
-                };
+    unsafe fn quoted<'a>(
+        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>, delim: u8
+    ) -> (&'a [u8], Option<Symbol<'i, Kind>>) where 'i: 'a, 's: 'a {
+        if self.kind != Kind::String { unreachable!() }
+        unsafe {
+            let spelling = self.spelling(buf);
+            let Range { start: _, end } = spelling.as_ptr_range();
 
-                if c > max {
-                    // error
-                    continue;
-                }
-                value = match encoding {
-                    None => { value << 8 | c }
-                    _ => { c }
-                };
-                count += 1;
+            let mut suffix = end;
+            for i in 1.. {
+                let ptr = end.offset(-i);
+                if *ptr == delim { break; }
+                suffix = ptr;
             }
-            let multi = count > 1;
-            match encoding {
-                None if !multi && value > 0x7F => { value = value as i8 as u64; }
-                _ => {}
+            if suffix == end {
+                return (spelling, None);
             }
 
-            ptr = ptr.offset(1);
-            if ptr == end {
-                return Some(Character { spelling, encoding, multi, value, suffix: None });
-            }
-
-            let suffix = ptr;
-            ptr = match try_ud_suffix(&mut 0, suffix) {
-                Some(ptr) => { ptr }
-                None => { suffix }
-            };
-            if ptr == end {
-                let slice = slice::from_raw_parts(suffix, ptr.offset_from(suffix) as usize);
-                let ident = symbols.intern(slice, Kind::Identifier);
-                return Some(Character { spelling, encoding, multi, value, suffix: Some(ident) });
-            }
-
-            None
+            let slice = slice::from_raw_parts(suffix, end.offset_from(suffix) as usize);
+            let ident = symbols.intern(slice, Kind::Identifier);
+            (spelling, Some(ident))
         }
     }
 }
@@ -964,7 +895,7 @@ fn hex(b: u8) -> bool { match b { b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => tru
 fn dec(b: u8) -> bool { match b { b'0'..=b'9' => true, _ => false } }
 fn oct(b: u8) -> bool { match b { b'0'..=b'7' => true, _ => false } }
 fn bin(b: u8) -> bool { match b { b'0'..=b'1' => true, _ => false } }
-unsafe fn skip<P: Fn(u8) -> bool>(p: P, mut ptr: *const u8) -> *const u8 {
+unsafe fn skip_digits<P: Fn(u8) -> bool>(p: P, mut ptr: *const u8) -> *const u8 {
     while p(*ptr) {
         ptr = ptr.offset(1);
         if *ptr == b'\'' && p(*ptr.offset(1)) { ptr = ptr.offset(2); }
@@ -1007,16 +938,96 @@ impl<'i, 'a> Number<'i, 'a> {
 
 impl<'i, 'a> Character<'i, 'a> {
     #[inline]
-    pub fn encoding(&self) -> Option<Encoding> { self.encoding }
-
-    #[inline]
-    pub fn multi(&self) -> bool { self.multi }
-
-    #[inline]
-    pub fn value(&self) -> u64 { self.value }
-
-    #[inline]
     pub fn suffix(&self) -> Option<Symbol<'i, Kind>> { self.suffix }
+
+    pub fn value(&self) -> (Option<Encoding>, bool, u64) {
+        let Character { spelling, .. } = *self;
+        let Range { start: ptr, .. } = spelling.as_ptr_range();
+        unsafe {
+            let (encoding, mut ptr) = match (*ptr, ptr.offset(1)) {
+                (b'L', ptr) => { (Some(Encoding::Wide), ptr) }
+                (b'u', ptr) => match (*ptr, ptr.offset(1)) {
+                    (b'8', ptr) => { (Some(Encoding::Utf8), ptr) }
+                    _ => { (Some(Encoding::Utf16), ptr) }
+                }
+                (b'U', ptr) => { (Some(Encoding::Utf32), ptr) }
+                _ => { (None, ptr) }
+            };
+            let max = match encoding {
+                None => { 0x7F }
+                Some(Encoding::Wide) => { 0xFFFF }
+                Some(Encoding::Utf16) => { 0xFFFF }
+                Some(Encoding::Utf32) => { 0xFFFF_FFFF }
+                Some(Encoding::Utf8) => { 0x7F }
+            };
+            ptr = ptr.offset(1);
+
+            let mut value = 0;
+            let mut count = 0;
+            loop {
+                let mut c = 0;
+                ptr = match (*ptr, ptr.offset(1)) {
+                    (b'\\', ptr) => match (*ptr, ptr.offset(1)) {
+                        (b @ b'\'' | b @ b'"' | b @ b'?' | b @ b'\\', end) => { c = b as u64; end }
+                        (b'a', end) => { c = b'\x07' as u64; end }
+                        (b'b', end) => { c = b'\x08' as u64; end }
+                        (b'f', end) => { c = b'\x0C' as u64; end }
+                        (b'n', end) => { c = b'\n' as u64; end }
+                        (b'r', end) => { c = b'\r' as u64; end }
+                        (b't', end) => { c = b'\t' as u64; end }
+                        (b'v', end) => { c = b'\x0B' as u64; end }
+                        (b'x', mut end) => loop {
+                            if !hex(*end) { break end; }
+                            c = c << 4 | hex_value(*end) as u64;
+                            end = end.offset(1);
+                        }
+                        (b'0'..=b'7', mut end) => loop {
+                            if end.offset_from(ptr) == 3 { break end; }
+                            if !oct(*end) { break end; }
+                            c = c << 3 | (*ptr - b'0') as u64;
+                            end = end.offset(1);
+                        }
+                        (b @ (b'u' | b'U'), end) => match try_ucn(&mut 0, ptr) {
+                            Some((b, end)) => { c = b as u64; end }
+                            None => {
+                                // error
+                                c = b as u64;
+                                end
+                            }
+                        }
+                        (b, end) => {
+                            // error
+                            c = b as u64;
+                            end
+                        }
+                    }
+                    (b'\'', _) => { break; }
+                    (0x80.., ptr) => match try_utf8(ptr) {
+                        Some((b, ptr)) => { c = b as u64; ptr }
+                        _ => { ptr }
+                    }
+                    (b, ptr) => { c = b as u64; ptr }
+                };
+
+                if c > max {
+                    // error
+                    continue;
+                }
+                value = match encoding {
+                    None => { value << 8 | c }
+                    _ => { c }
+                };
+                count += 1;
+            }
+            let multi = count > 1;
+            match encoding {
+                None if !multi && value > 0x7F => { value = value as i8 as u64; }
+                _ => {}
+            }
+
+            (encoding, multi, value)
+        }
+    }
 }
 
 fn hex_value(d: u8) -> u8 {
@@ -1026,6 +1037,11 @@ fn hex_value(d: u8) -> u8 {
         b'A'..=b'F' => { b'A' }
         _ => { unreachable!() }
     }
+}
+
+impl<'i, 'a> String<'i, 'a> {
+    #[inline]
+    pub fn suffix(&self) -> Option<Symbol<'i, Kind>> { self.suffix }
 }
 
 /// Write the spelling of the token in `ptr..end` to `buf`, without splices or UCNs.
