@@ -9,79 +9,72 @@ pub fn parse<'i, 'a, 's>(
     grammar_symbols: &'i SymbolMap<()>, read: &grammar::Read<'i>, analysis: &'a Analysis,
     cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, tokens: lex::Tokens<'s>,
 ) -> Parse<'a> {
+    let integer_literal = grammar_symbols.intern(b"integer-literal", ());
+    let user_defined_integer_literal = grammar_symbols.intern(b"user-defined-integer-literal", ());
+    let floating_point_literal = grammar_symbols.intern(b"floating-point-literal", ());
+    let user_defined_floating_point_literal = grammar_symbols.intern(b"user-defined-floating-point-literal", ());
+    let character_literal = grammar_symbols.intern(b"character-literal", ());
+    let user_defined_character_literal = grammar_symbols.intern(b"user-defined-character-literal", ());
+    let string_literal = grammar_symbols.intern(b"string-literal", ());
+    let user_defined_string_literal = grammar_symbols.intern(b"user-defined-string-literal", ());
+
+    let integer_literal = read.terminals.get_index_of(&integer_literal).unwrap();
+    let user_defined_integer_literal = read.terminals.get_index_of(&user_defined_integer_literal).unwrap();
+    let floating_point_literal = read.terminals.get_index_of(&floating_point_literal).unwrap();
+    let user_defined_floating_point_literal = read.terminals.get_index_of(&user_defined_floating_point_literal).unwrap();
+    let character_literal = read.terminals.get_index_of(&character_literal).unwrap();
+    let user_defined_character_literal = read.terminals.get_index_of(&user_defined_character_literal).unwrap();
+    let string_literal = read.terminals.get_index_of(&string_literal).unwrap();
+    let user_defined_string_literal = read.terminals.get_index_of(&user_defined_string_literal).unwrap();
+
     let tokens = &mut cpp.tokens(tokens);
+    let scratch = &mut Vec::default();
     let mut parse = Parse::from_analysis(&analysis);
     loop {
-        // TODO: Don't just re-intern things to convert to syntax's idea of token kinds.
-        // This is slightly tricky because the preprocessor needs to treat keywords as identifiers.
         let token = tokens.preprocessed_token(cpp, symbols);
         let terminal = match token.kind() {
             lex::Kind::EndOfFile => { break; }
-            lex::Kind::Identifier => {
+
+            kind @ lex::Kind::Identifier => {
+                // TODO: Don't re-intern identifiers to check for keywords.
                 let symbol = grammar_symbols.intern(token.ident().key(), ());
-                if read.terminals.contains(&symbol) {
-                    std::str::from_utf8(token.ident().key()).unwrap()
-                } else {
-                    "identifier"
+                match read.terminals.get_index_of(&symbol) {
+                    Some(terminal) => { terminal }
+                    None => { kind as usize }
                 }
             }
-            lex::Kind::Number => { "integer-literal" }
-            lex::Kind::Character => { "character-literal" }
-            lex::Kind::String => { "string-literal" }
-            lex::Kind::LeftBrace => { "{" }
-            lex::Kind::RightBrace => { "}" }
-            lex::Kind::LeftBracket => { "[" }
-            lex::Kind::RightBracket => { "]" }
-            lex::Kind::LeftParen => { "(" }
-            lex::Kind::RightParen => { ")" }
-            lex::Kind::Semi => { ";" }
-            lex::Kind::Colon => { ":" }
-            lex::Kind::Ellipsis => { "..." }
-            lex::Kind::Question => { "?" }
-            lex::Kind::ColonColon => { "::" }
-            lex::Kind::Dot => { "." }
-            lex::Kind::DotStar => { ".*" }
-            lex::Kind::Arrow => { "->" }
-            lex::Kind::ArrowStar => { "->*" }
-            lex::Kind::Tilde => { "~" }
-            lex::Kind::Exclaim => { "!" }
-            lex::Kind::Plus => { "+" }
-            lex::Kind::Minus => { "-" }
-            lex::Kind::Star => { "*" }
-            lex::Kind::Slash => { "/" }
-            lex::Kind::Percent => { "%" }
-            lex::Kind::Caret => { "^" }
-            lex::Kind::Amp => { "&" }
-            lex::Kind::Pipe => { "|" }
-            lex::Kind::Eq => { "=" }
-            lex::Kind::PlusEq => { "+=" }
-            lex::Kind::MinusEq => { "-=" }
-            lex::Kind::StarEq => { "*=" }
-            lex::Kind::SlashEq => { "/=" }
-            lex::Kind::PercentEq => { "%=" }
-            lex::Kind::CaretEq => { "^=" }
-            lex::Kind::AmpEq => { "%=" }
-            lex::Kind::PipeEq => { "|=" }
-            lex::Kind::EqEq => { "==" }
-            lex::Kind::ExclaimEq => { "!=" }
-            lex::Kind::Lt => { "<" }
-            lex::Kind::Gt => { ">" }
-            lex::Kind::LtEq => { "<=" }
-            lex::Kind::GtEq => { ">=" }
-            lex::Kind::LtEqGt => { "<=>" }
-            lex::Kind::AmpAmp => { "&&" }
-            lex::Kind::PipePipe => { "||" }
-            lex::Kind::LtLt => { "<<" }
-            lex::Kind::GtGt => { ">>" }
-            lex::Kind::LtLtEq => { "<<=" }
-            lex::Kind::GtGtEq => { ">>=" }
-            lex::Kind::PlusPlus => { "++" }
-            lex::Kind::MinusMinus => { "--" }
-            lex::Kind::Comma => { "," }
-            _ => { unreachable!() }
+
+            lex::Kind::Number => {
+                let number = token.number(symbols, scratch).unwrap();
+                let float = number.float();
+                let suffix = match number.size() {
+                    Some(lex::Size::User(_)) => { true }
+                    _ => { false }
+                };
+                match (float, suffix) {
+                    (false, false) => { integer_literal }
+                    (false, true) => { user_defined_integer_literal }
+                    (true, false) => { floating_point_literal }
+                    (true, true) => { user_defined_floating_point_literal }
+                }
+            }
+            lex::Kind::Character => {
+                let character = token.character(symbols, scratch);
+                match character.suffix() {
+                    None => { character_literal }
+                    Some(_) => { user_defined_character_literal }
+                }
+            }
+            lex::Kind::String => {
+                let string = token.string(symbols, scratch);
+                match string.suffix() {
+                    None => { string_literal }
+                    Some(_) => { user_defined_string_literal }
+                }
+            }
+
+            kind => { kind as usize }
         };
-        let terminal = grammar_symbols.intern(terminal.as_bytes(), ());
-        let terminal = read.terminals.get_index_of(&terminal).unwrap();
         parse.parse(terminal);
     }
 

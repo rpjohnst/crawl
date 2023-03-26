@@ -1,9 +1,9 @@
-use crate::grammar::{Rules, VisitRules, Term};
+use crate::grammar::{Rules, VisitRules, VisitTerminals, Term};
 
 pub struct Syntax;
 
 impl Rules for Syntax {
-    fn walk(&self, f: &mut impl VisitRules) {
+    fn walk_rules(&self, f: &mut impl VisitRules) {
         // Basics
 
         f.def("translation-unit")
@@ -1248,6 +1248,64 @@ impl Rules for Syntax {
         f.def("identifier-list")
             .alt("identifier")
             .alt(("identifier-list", ",", "identifier"))
+        ;
+    }
+
+    fn walk_terminals(&self, f: &mut impl VisitTerminals) {
+        // Preprocessing tokens
+
+        f
+            .token("end-of-file").token("end-of-line")
+
+            .token("header-name")
+
+            .token("identifier").token("number").token("character").token("string")
+
+            .token("#").token("##")
+
+            .token("{").token("}").token("[").token("]").token("(").token(")")
+            .token(";").token(":").token("...")
+            .token("?").token("::").token(".").token(".*").token("->").token("->*").token("~")
+            .token("!").token("+").token("-").token("*").token("/").token("%").token("^").token("&").token("|")
+            .token("=").token("+=").token("-=").token("*=").token("/=").token("%=").token("^=").token("&=").token("|=")
+            .token("==").token("!=").token("<").token(">").token("<=").token(">=").token("<=>").token("&&").token("||")
+            .token("<<").token(">>").token("<<=").token(">>=").token("++").token("--").token(",")
+
+            .token("error")
+        ;
+
+        // Additional phase 7 tokens
+
+        f
+            .token("integer-literal")
+            .token("character-literal")
+            .token("floating-point-literal")
+            .token("string-literal")
+            .token("user-defined-integer-literal")
+            .token("user-defined-floating-point-literal")
+            .token("user-defined-string-literal")
+            .token("user-defined-character-literal")
+        ;
+
+        f
+            .token("alignas").token("alignof").token("asm").token("auto").token("bool")
+            .token("break").token("case").token("catch").token("char").token("char8_t")
+            .token("char16_t").token("char32_t").token("class").token("concept").token("const")
+            .token("consteval").token("constexpr").token("constinit").token("const_cast")
+            .token("continue").token("co_await").token("co_return").token("co_yield")
+            .token("decltype").token("default").token("delete").token("do").token("double")
+            .token("dynamic_cast").token("else").token("enum").token("explicit").token("export")
+            .token("extern").token("false").token("float").token("for").token("friend")
+            .token("goto").token("if").token("inline").token("int").token("long").token("mutable")
+            .token("namespace").token("new").token("noexcept").token("nullptr").token("operator")
+            .token("private").token("protected").token("public").token("register")
+            .token("reinterpret_cast").token("requires").token("return").token("short")
+            .token("signed").token("sizeof").token("static").token("static_assert")
+            .token("static_cast").token("struct").token("switch").token("template").token("this")
+            .token("thread_local").token("throw").token("true").token("try").token("typedef")
+            .token("typeid").token("typename").token("union").token("unsigned").token("using")
+            .token("virtual").token("void").token("volatile").token("wchar_t").token("while")
+            .token("import-keyword").token("module-keyword").token("export-keyword")
         ;
     }
 }
