@@ -1,4 +1,3 @@
-use crate::symbols::SymbolMap;
 use crate::grammar;
 use crate::earley::{Analysis, Parse};
 use crate::lex;
@@ -6,27 +5,9 @@ use crate::cpp::Preprocessor;
 
 /// Translation phase 7 - convert pp-tokens to tokens and parse
 pub fn parse<'i, 'a, 's>(
-    grammar_symbols: &'i SymbolMap<()>, read: &grammar::Read<'i>, analysis: &'a Analysis,
-    cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, tokens: lex::Tokens<'s>,
+    analysis: &'a Analysis,
+    cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, tokens: lex::Tokens<'s>,
 ) -> Parse<'a> {
-    let integer_literal = grammar_symbols.intern(b"integer-literal", ());
-    let user_defined_integer_literal = grammar_symbols.intern(b"user-defined-integer-literal", ());
-    let floating_point_literal = grammar_symbols.intern(b"floating-point-literal", ());
-    let user_defined_floating_point_literal = grammar_symbols.intern(b"user-defined-floating-point-literal", ());
-    let character_literal = grammar_symbols.intern(b"character-literal", ());
-    let user_defined_character_literal = grammar_symbols.intern(b"user-defined-character-literal", ());
-    let string_literal = grammar_symbols.intern(b"string-literal", ());
-    let user_defined_string_literal = grammar_symbols.intern(b"user-defined-string-literal", ());
-
-    let integer_literal = read.terminals.get_index_of(&integer_literal).unwrap();
-    let user_defined_integer_literal = read.terminals.get_index_of(&user_defined_integer_literal).unwrap();
-    let floating_point_literal = read.terminals.get_index_of(&floating_point_literal).unwrap();
-    let user_defined_floating_point_literal = read.terminals.get_index_of(&user_defined_floating_point_literal).unwrap();
-    let character_literal = read.terminals.get_index_of(&character_literal).unwrap();
-    let user_defined_character_literal = read.terminals.get_index_of(&user_defined_character_literal).unwrap();
-    let string_literal = read.terminals.get_index_of(&string_literal).unwrap();
-    let user_defined_string_literal = read.terminals.get_index_of(&user_defined_string_literal).unwrap();
-
     let tokens = &mut cpp.tokens(tokens);
     let scratch = &mut Vec::default();
     let mut parse = Parse::from_analysis(&analysis);
@@ -35,13 +16,9 @@ pub fn parse<'i, 'a, 's>(
         let terminal = match token.kind() {
             lex::Kind::EndOfFile => { break; }
 
-            kind @ lex::Kind::Identifier => {
-                // TODO: Don't re-intern identifiers to check for keywords.
-                let symbol = grammar_symbols.intern(token.ident().key(), ());
-                match read.terminals.get_index_of(&symbol) {
-                    Some(terminal) => { terminal }
-                    None => { kind as usize }
-                }
+            lex::Kind::Identifier => {
+                let &(_, kind) = token.ident().value();
+                kind as usize
             }
 
             lex::Kind::Number => {
@@ -52,24 +29,24 @@ pub fn parse<'i, 'a, 's>(
                     _ => { false }
                 };
                 match (float, suffix) {
-                    (false, false) => { integer_literal }
-                    (false, true) => { user_defined_integer_literal }
-                    (true, false) => { floating_point_literal }
-                    (true, true) => { user_defined_floating_point_literal }
+                    (false, false) => { lex::Kind::IntegerLiteral as usize }
+                    (false, true) => { lex::Kind::UserIntegerLiteral as usize }
+                    (true, false) => { lex::Kind::FloatLiteral as usize }
+                    (true, true) => { lex::Kind::UserFloatLiteral as usize }
                 }
             }
             lex::Kind::Character => {
                 let character = token.character(symbols, scratch);
                 match character.suffix() {
-                    None => { character_literal }
-                    Some(_) => { user_defined_character_literal }
+                    None => { lex::Kind::CharacterLiteral as usize }
+                    Some(_) => { lex::Kind::UserCharacterLiteral as usize }
                 }
             }
             lex::Kind::String => {
                 let string = token.string(symbols, scratch);
                 match string.suffix() {
-                    None => { string_literal }
-                    Some(_) => { user_defined_string_literal }
+                    None => { lex::Kind::StringLiteral as usize }
+                    Some(_) => { lex::Kind::UserStringLiteral as usize }
                 }
             }
 
@@ -79,6 +56,17 @@ pub fn parse<'i, 'a, 's>(
     }
 
     parse
+}
+
+/// Assign kinds to keywords.
+///
+/// Should be called before interning anything else that might overlap.
+pub fn keywords(read: &grammar::Read<'_>, symbols: &lex::SymbolMap) {
+    for &k in &read.keywords[..] {
+        let keyword = read.terminals[k];
+        let Ok(kind) = u8::try_from(k) else { unreachable!() };
+        symbols.intern(keyword.key(), (lex::Kind::Identifier, kind));
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +109,7 @@ int main(int argc, char *argv[]) {
 \0\0\0").unwrap();
 
         let cpp = &mut Preprocessor::new(symbols, source);
-        let parse = parse(grammar_symbols, &read, analysis, cpp, symbols, tokens);
+        let parse = parse(analysis, cpp, symbols, tokens);
 
         let Parse { ref sets, ref nodes, ref packs, .. } = parse;
         let Grammar { terminals, .. } = grammar;

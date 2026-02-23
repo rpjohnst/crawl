@@ -3,7 +3,6 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use crate::lex;
-use crate::symbols::{SymbolMap, Symbol};
 
 /// Translation phase 4 - preprocessing directives and macro expansion
 pub struct Preprocessor<'i, 's> {
@@ -11,30 +10,30 @@ pub struct Preprocessor<'i, 's> {
 
     conditionals: Vec<Conditional>,
     lexers: Vec<(usize, lex::Tokens<'s>)>,
-    macros: HashMap<Symbol<'i, lex::Kind>, Macro<'i, 's>>,
+    macros: HashMap<lex::Symbol<'i>, Macro<'i, 's>>,
 
-    if_: Symbol<'i, lex::Kind>,
-    ifdef: Symbol<'i, lex::Kind>,
-    ifndef: Symbol<'i, lex::Kind>,
-    elif: Symbol<'i, lex::Kind>,
-    else_: Symbol<'i, lex::Kind>,
-    endif: Symbol<'i, lex::Kind>,
+    if_: lex::Symbol<'i>,
+    ifdef: lex::Symbol<'i>,
+    ifndef: lex::Symbol<'i>,
+    elif: lex::Symbol<'i>,
+    else_: lex::Symbol<'i>,
+    endif: lex::Symbol<'i>,
 
-    defined: Symbol<'i, lex::Kind>,
-    #[allow(unused)] has_include: Symbol<'i, lex::Kind>,
-    #[allow(unused)] has_cpp_attribute: Symbol<'i, lex::Kind>,
-    true_: Symbol<'i, lex::Kind>,
-    false_: Symbol<'i, lex::Kind>,
+    defined: lex::Symbol<'i>,
+    #[allow(unused)] has_include: lex::Symbol<'i>,
+    #[allow(unused)] has_cpp_attribute: lex::Symbol<'i>,
+    true_: lex::Symbol<'i>,
+    false_: lex::Symbol<'i>,
 
-    include: Symbol<'i, lex::Kind>,
-    define: Symbol<'i, lex::Kind>,
-    undef: Symbol<'i, lex::Kind>,
-    line: Symbol<'i, lex::Kind>,
-    error: Symbol<'i, lex::Kind>,
-    pragma: Symbol<'i, lex::Kind>,
+    include: lex::Symbol<'i>,
+    define: lex::Symbol<'i>,
+    undef: lex::Symbol<'i>,
+    line: lex::Symbol<'i>,
+    error: lex::Symbol<'i>,
+    pragma: lex::Symbol<'i>,
 
-    va_args: Symbol<'i, lex::Kind>,
-    va_opt: Symbol<'i, lex::Kind>,
+    va_args: lex::Symbol<'i>,
+    va_opt: lex::Symbol<'i>,
 }
 
 pub trait Source {
@@ -52,7 +51,7 @@ struct Macro<'i, 's> {
     active: Cell<bool>,
 }
 
-struct Parameter<'i> { name: Symbol<'i, lex::Kind>, replaced: bool, stringized: bool }
+struct Parameter<'i> { name: lex::Symbol<'i>, replaced: bool, stringized: bool }
 
 #[derive(Copy, Clone)]
 struct Token<'i, 's> { space: lex::Space, token: lex::Token<'i, 's>, replace: bool }
@@ -69,36 +68,36 @@ pub struct Tokens<'i, 's> {
     scratch: Vec<u8>,
 }
 
-struct Invoked<'i> { name: Symbol<'i, lex::Kind>, begin: usize }
+struct Invoked<'i> { name: lex::Symbol<'i>, begin: usize }
 
 impl<'i, 's> Preprocessor<'i, 's> {
-    pub fn new(symbols: &'i SymbolMap<lex::Kind>, source: &'s dyn Source) -> Preprocessor<'i, 's> {
+    pub fn new(symbols: &'i lex::SymbolMap, source: &'s dyn Source) -> Preprocessor<'i, 's> {
         let conditionals = Vec::default();
         let lexers = Vec::default();
         let macros = HashMap::default();
 
-        let if_ = symbols.intern(b"if", lex::Kind::Identifier);
-        let ifdef = symbols.intern(b"ifdef", lex::Kind::Identifier);
-        let ifndef = symbols.intern(b"ifndef", lex::Kind::Identifier);
-        let elif = symbols.intern(b"elif", lex::Kind::Identifier);
-        let else_ = symbols.intern(b"else", lex::Kind::Identifier);
-        let endif = symbols.intern(b"endif", lex::Kind::Identifier);
+        let if_ = symbols.intern(b"if", lex::kind(lex::Kind::Identifier));
+        let ifdef = symbols.intern(b"ifdef", lex::kind(lex::Kind::Identifier));
+        let ifndef = symbols.intern(b"ifndef", lex::kind(lex::Kind::Identifier));
+        let elif = symbols.intern(b"elif", lex::kind(lex::Kind::Identifier));
+        let else_ = symbols.intern(b"else", lex::kind(lex::Kind::Identifier));
+        let endif = symbols.intern(b"endif", lex::kind(lex::Kind::Identifier));
 
-        let defined = symbols.intern(b"defined", lex::Kind::Identifier);
-        let has_include = symbols.intern(b"__has_include", lex::Kind::Identifier);
-        let has_cpp_attribute = symbols.intern(b"__has_cpp_attribute", lex::Kind::Identifier);
-        let true_ = symbols.intern(b"true", lex::Kind::Identifier);
-        let false_ = symbols.intern(b"false", lex::Kind::Identifier);
+        let defined = symbols.intern(b"defined", lex::kind(lex::Kind::Identifier));
+        let has_include = symbols.intern(b"__has_include", lex::kind(lex::Kind::Identifier));
+        let has_cpp_attribute = symbols.intern(b"__has_cpp_attribute", lex::kind(lex::Kind::Identifier));
+        let true_ = symbols.intern(b"true", lex::kind(lex::Kind::Identifier));
+        let false_ = symbols.intern(b"false", lex::kind(lex::Kind::Identifier));
 
-        let include = symbols.intern(b"include", lex::Kind::Identifier);
-        let define = symbols.intern(b"define", lex::Kind::Identifier);
-        let undef = symbols.intern(b"undef", lex::Kind::Identifier);
-        let line = symbols.intern(b"line", lex::Kind::Identifier);
-        let error = symbols.intern(b"error", lex::Kind::Identifier);
-        let pragma = symbols.intern(b"pragma", lex::Kind::Identifier);
+        let include = symbols.intern(b"include", lex::kind(lex::Kind::Identifier));
+        let define = symbols.intern(b"define", lex::kind(lex::Kind::Identifier));
+        let undef = symbols.intern(b"undef", lex::kind(lex::Kind::Identifier));
+        let line = symbols.intern(b"line", lex::kind(lex::Kind::Identifier));
+        let error = symbols.intern(b"error", lex::kind(lex::Kind::Identifier));
+        let pragma = symbols.intern(b"pragma", lex::kind(lex::Kind::Identifier));
 
-        let va_args = symbols.intern(b"__VA_ARGS__", lex::Kind::Identifier);
-        let va_opt = symbols.intern(b"__VA_OPT__", lex::Kind::Identifier);
+        let va_args = symbols.intern(b"__VA_ARGS__", lex::kind(lex::Kind::Identifier));
+        let va_opt = symbols.intern(b"__VA_OPT__", lex::kind(lex::Kind::Identifier));
 
         Preprocessor {
             source,
@@ -123,7 +122,7 @@ impl<'i, 's> Preprocessor<'i, 's> {
 
 impl<'i, 's> Tokens<'i, 's> {
     pub fn preprocessed_token(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) -> lex::Token<'i, 's> {
         loop {
             let token = self.expanded_token(cpp, symbols, false);
@@ -144,7 +143,7 @@ impl<'i, 's> Tokens<'i, 's> {
         }
     }
 
-    fn directive(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>) {
+    fn directive(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
         assert!(self.buffer.is_empty());
 
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
@@ -183,7 +182,7 @@ impl<'i, 's> Tokens<'i, 's> {
         }
     }
 
-    fn if_directive(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>) {
+    fn if_directive(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
         let mut token = self.expanded_token(cpp, symbols, true);
         let active = match self.constant_expression(cpp, symbols, &mut token, true, 3) {
             Some(value) => { value.value != 0 }
@@ -201,7 +200,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn ifdef_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, positive: bool
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, positive: bool
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
         let mut active = match token.kind() {
@@ -223,7 +222,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn elif_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         self.discard_directive(cpp, symbols);
 
@@ -235,7 +234,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn else_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
         match token.kind() {
@@ -253,7 +252,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn endif_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
         match token.kind() {
@@ -266,7 +265,7 @@ impl<'i, 's> Tokens<'i, 's> {
         }
     }
 
-    fn skip_groups(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>) {
+    fn skip_groups(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
         loop {
             let token = self.unexpanded_token(cpp, symbols, false);
             match token.token.kind() {
@@ -344,7 +343,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn constant_expression(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>,
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
         token: &mut Token<'i, 's>, live: bool, precedence: u8
     ) -> Option<Value> {
         let mut left = match token.token.kind() {
@@ -640,7 +639,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn include_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let space = self.tokens.whitespace(false);
         if space.kind == lex::Shape::Newline { self.newline = true; }
@@ -699,7 +698,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn define_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
         let name = match token.kind() {
@@ -847,7 +846,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn undef_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
         let name = match token.kind() {
@@ -865,7 +864,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn line_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         let Token { token, .. } = self.expanded_token(cpp, symbols, true);
         let _line = match token.kind() {
@@ -883,18 +882,18 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn error_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         self.discard_directive(cpp, symbols);
     }
 
     fn pragma_directive(
-        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>
+        &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
         self.discard_directive(cpp, symbols);
     }
 
-    fn discard_directive(&mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>) {
+    fn discard_directive(&mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
         loop {
             let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
             if token.kind() == lex::Kind::EndOfLine { break; }
@@ -902,7 +901,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn expanded_token(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, horizontal: bool
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, horizontal: bool
     ) -> Token<'i, 's> {
         loop {
             let mut token = self.unexpanded_token(cpp, symbols, horizontal);
@@ -912,7 +911,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn unexpanded_token(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, horizontal: bool
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, horizontal: bool
     ) -> Token<'i, 's> {
         while let Some(&Invoked { name, begin }) = self.macros.last() {
             if begin < self.buffer.len() { break; }
@@ -947,7 +946,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn try_unexpanded_left_paren(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>, horizontal: bool
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, horizontal: bool
     ) -> bool {
         while let Some(&Invoked { name, begin }) = self.macros.last() {
             if begin < self.buffer.len() { break; }
@@ -981,7 +980,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn try_replace_macro(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>,
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
         token: &mut Token<'i, 's>, horizontal: bool
     ) -> bool {
         let name = match token.token.kind() {
@@ -1240,7 +1239,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn stringize(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>,
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
         tokens: &[Token<'i, 's>]
     ) -> Token<'i, 's> {
         self.scratch.push(b'"');
@@ -1278,7 +1277,7 @@ impl<'i, 's> Tokens<'i, 's> {
     }
 
     fn paste(
-        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i SymbolMap<lex::Kind>,
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
         prev: &Token<'i, 's>, next: &Token<'i, 's>
     ) -> Token<'i, 's> {
         prev.token.write_spelling(&mut self.scratch);

@@ -20,12 +20,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let symbols = &SymbolMap::default();
     lex::Tokens::alternative_tokens(symbols);
+    crawl::parse::keywords(&read, symbols);
 
     let source = &ScratchBuffers::default();
     let tokens = lex::Tokens::from_bytes_with_padding(&text[..]).unwrap();
 
     let cpp = &mut Preprocessor::new(symbols, source);
-    let parse = parse(grammar_symbols, &read, analysis, cpp, symbols, tokens);
+    let parse = parse(analysis, cpp, symbols, tokens);
 
     let Parse { ref sets, ref nodes, ref packs, .. } = parse;
     let Grammar { terminals, .. } = grammar;

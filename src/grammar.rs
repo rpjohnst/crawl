@@ -29,11 +29,13 @@ pub trait VisitRules {
     fn def<T>(&mut self, left: T) -> Def<'_, Self, T> where Self: Sized { Def(self, left) }
 }
 pub trait VisitTerminals {
-    fn visit_terminal(&mut self, term: &[u8]);
-    fn token(&mut self, term: impl Term) -> &mut Self {
+    fn visit_terminal(&mut self, term: &[u8], keyword: bool);
+    fn token(&mut self, term: impl Term) -> &mut Self { self.term(term, false) }
+    fn keyword(&mut self, term: impl Term) -> &mut Self { self.term(term, true) }
+    fn term(&mut self, term: impl Term, keyword: bool) -> &mut Self {
         term.walk(|term, optional| {
             assert!(!optional, "terminals must not be optional");
-            self.visit_terminal(term);
+            self.visit_terminal(term, keyword);
         });
         self
     }
@@ -107,10 +109,11 @@ impl<'g> Grammar<'g> {
         (Read<'i>, Grammar<'g>)
     {
         // First pass: collect symbol names and assign indices.
+        let keywords = Vec::default();
         let terminals = IndexSet::new();
         let variables = IndexSet::new();
         let optionals = IndexSet::new();
-        let mut read = Read { symbols, terminals, variables, optionals };
+        let mut read = Read { symbols, keywords, terminals, variables, optionals };
         rules.walk_terminals(&mut read);
         rules.walk_rules(&mut read);
 
@@ -146,15 +149,17 @@ impl<'g> Grammar<'g> {
 
 pub struct Read<'i> {
     symbols: &'i SymbolMap<'i, ()>,
+    pub keywords: Vec<usize>,
     pub terminals: IndexSet<Symbol<'i, ()>>,
     pub variables: IndexSet<Symbol<'i, ()>>,
     pub optionals: IndexSet<Symbol<'i, ()>>,
 }
 
 impl VisitTerminals for Read<'_> {
-    fn visit_terminal(&mut self, term: &[u8]) {
+    fn visit_terminal(&mut self, term: &[u8], keyword: bool) {
         let term = self.symbols.intern(term, ());
-        self.terminals.insert(term);
+        let (k, _) = self.terminals.insert_full(term);
+        if keyword { self.keywords.push(k); }
     }
 }
 

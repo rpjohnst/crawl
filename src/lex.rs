@@ -3,8 +3,6 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeInclusive};
 
-use crate::symbols::{SymbolMap, Symbol};
-
 /// Translation phase 3 - whitespace and comments, UCNs, and preprocessing tokens
 #[derive(Copy, Clone)]
 pub struct Tokens<'s> { ptr: *const u8, end: *const u8, _marker: PhantomData<&'s [u8]> }
@@ -38,7 +36,17 @@ pub enum Kind {
     LtLt, GtGt, LtLtEq, GtGtEq, PlusPlus, MinusMinus, Comma,
 
     Error,
+
+    // Additional tokens produced in phase 7.
+
+    IntegerLiteral, CharacterLiteral, FloatLiteral, StringLiteral,
+    UserIntegerLiteral, UserFloatLiteral, UserStringLiteral, UserCharacterLiteral,
 }
+
+pub type SymbolMap<'u> = crate::symbols::SymbolMap<'u, (Kind, u8)>;
+pub type Symbol<'i> = crate::symbols::Symbol<'i, (Kind, u8)>;
+
+pub fn kind(kind: Kind) -> (Kind, u8) { (kind, kind as u8) }
 
 /// A preprocessing token's *spelling*, used for stringizing and pasting.
 ///
@@ -46,7 +54,7 @@ pub enum Kind {
 /// contain splices or UCNs to be removed.
 #[derive(Copy, Clone)]
 enum Spelling<'i, 's> {
-    Intern(Symbol<'i, Kind>),
+    Intern(Symbol<'i>),
     Buffer { flags: u8, data: ptr::NonNull<u8>, _marker: PhantomData<&'s [u8]> },
 }
 
@@ -62,16 +70,16 @@ pub struct Number<'i, 'a> {
 }
 
 #[derive(Copy, Clone)]
-pub enum Size<'i> { Long, LongLong, Size, Float, User(Symbol<'i, Kind>) }
+pub enum Size<'i> { Long, LongLong, Size, Float, User(Symbol<'i>) }
 
 pub struct Character<'i, 'a> {
     #[allow(unused)] spelling: &'a [u8],
-    suffix: Option<Symbol<'i, Kind>>,
+    suffix: Option<Symbol<'i>>,
 }
 
 pub struct String<'i, 'a> {
     #[allow(unused)] spelling: &'a [u8],
-    suffix: Option<Symbol<'i, Kind>>,
+    suffix: Option<Symbol<'i>>,
 }
 
 #[derive(Copy, Clone)]
@@ -103,18 +111,18 @@ impl<'s> Tokens<'s> {
     /// Assign kinds to alternative token spellings.
     ///
     /// Should be called before interning anything else that might overlap.
-    pub fn alternative_tokens(symbols: &SymbolMap<Kind>) {
-        symbols.intern(b"and", Kind::AmpAmp);
-        symbols.intern(b"and_eq", Kind::AmpEq);
-        symbols.intern(b"bitand", Kind::Amp);
-        symbols.intern(b"bitor", Kind::Pipe);
-        symbols.intern(b"compl", Kind::Tilde);
-        symbols.intern(b"not", Kind::Exclaim);
-        symbols.intern(b"not_eq", Kind::ExclaimEq);
-        symbols.intern(b"or", Kind::PipePipe);
-        symbols.intern(b"or_eq", Kind::PipeEq);
-        symbols.intern(b"xor", Kind::Caret);
-        symbols.intern(b"xor_eq", Kind::CaretEq);
+    pub fn alternative_tokens(symbols: &SymbolMap) {
+        symbols.intern(b"and", kind(Kind::AmpAmp));
+        symbols.intern(b"and_eq", kind(Kind::AmpEq));
+        symbols.intern(b"bitand", kind(Kind::Amp));
+        symbols.intern(b"bitor", kind(Kind::Pipe));
+        symbols.intern(b"compl", kind(Kind::Tilde));
+        symbols.intern(b"not", kind(Kind::Exclaim));
+        symbols.intern(b"not_eq", kind(Kind::ExclaimEq));
+        symbols.intern(b"or", kind(Kind::PipePipe));
+        symbols.intern(b"or_eq", kind(Kind::PipeEq));
+        symbols.intern(b"xor", kind(Kind::Caret));
+        symbols.intern(b"xor_eq", kind(Kind::CaretEq));
     }
 
     /// Consume whitespace and comments.
@@ -180,7 +188,7 @@ impl<'s> Tokens<'s> {
 
     /// Consume a preprocessing token. Whitespace must be skipped first with [`Tokens::whitespace`].
     pub fn preprocessing_token<'i>(
-        &mut self, symbols: &'i SymbolMap<Kind>, scratch: &mut Vec<u8>
+        &mut self, symbols: &'i SymbolMap, scratch: &mut Vec<u8>
     ) -> Token<'i, 's> {
         let flags = &mut 0;
 
@@ -393,7 +401,7 @@ impl<'s> Tokens<'s> {
     }
 
     unsafe fn identifier<'i>(
-        &mut self, flags: &mut u8, symbols: &'i SymbolMap<Kind>, scratch: &mut Vec<u8>,
+        &mut self, flags: &mut u8, symbols: &'i SymbolMap, scratch: &mut Vec<u8>,
         mut ptr: *const u8
     ) -> Token<'i, 'static> {
         loop {
@@ -413,16 +421,16 @@ impl<'s> Tokens<'s> {
 
         let len = ptr.offset_from(self.ptr) as usize;
         let ident = if (*flags & FLAG_SPLICE) == 0 && (*flags & FLAG_UCN) == 0 {
-            symbols.intern(slice::from_raw_parts(self.ptr, len), Kind::Identifier)
+            symbols.intern(slice::from_raw_parts(self.ptr, len), kind(Kind::Identifier))
         } else {
             scratch.reserve(len);
             clean_spelling(scratch, Kind::Identifier, self.ptr, ptr);
-            let ident = symbols.intern(&scratch[..], Kind::Identifier);
+            let ident = symbols.intern(&scratch[..], kind(Kind::Identifier));
             scratch.clear();
             ident
         };
 
-        let kind = *ident.value();
+        let (kind, _) = *ident.value();
         self.ptr = ptr;
         Token { kind, len, spelling: Spelling::Intern(ident) }
     }
@@ -669,7 +677,7 @@ impl<'i, 's> Token<'i, 's> {
     pub fn len(&self) -> usize { self.len }
 
     #[inline]
-    pub fn ident(&self) -> Symbol<'i, Kind> {
+    pub fn ident(&self) -> Symbol<'i> {
         match self.spelling {
             Spelling::Intern(ident) => { ident }
             _ => { unreachable!() }
@@ -711,7 +719,7 @@ impl<'i, 's> Token<'i, 's> {
     }
 
     pub fn number<'a>(
-        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+        &self, symbols: &'i SymbolMap, buf: &'a mut Vec<u8>
     ) -> Option<Number<'i, 'a>> where 'i: 'a, 's: 'a {
         if self.kind != Kind::Number { unreachable!() }
         unsafe {
@@ -837,7 +845,7 @@ impl<'i, 's> Token<'i, 's> {
             }
             if ptr == end {
                 let slice = slice::from_raw_parts(suffix, ptr.offset_from(suffix) as usize);
-                let ident = symbols.intern(slice, Kind::Identifier);
+                let ident = symbols.intern(slice, kind(Kind::Identifier));
                 size = Some(Size::User(ident));
                 return Some(Number { spelling, digits, suffix, radix, float, unsigned, size });
             }
@@ -847,7 +855,7 @@ impl<'i, 's> Token<'i, 's> {
     }
 
     pub fn character<'a>(
-        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+        &self, symbols: &'i SymbolMap, buf: &'a mut Vec<u8>
     ) -> Character<'i, 'a> where 'i: 'a, 's: 'a {
         if self.kind != Kind::Character { unreachable!() }
         unsafe {
@@ -857,7 +865,7 @@ impl<'i, 's> Token<'i, 's> {
     }
 
     pub fn string<'a>(
-        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>
+        &self, symbols: &'i SymbolMap, buf: &'a mut Vec<u8>
     ) -> String<'i, 'a> where 'i: 'a, 's: 'a {
         if self.kind != Kind::String { unreachable!() }
         unsafe {
@@ -867,8 +875,8 @@ impl<'i, 's> Token<'i, 's> {
     }
 
     unsafe fn quoted<'a>(
-        &self, symbols: &'i SymbolMap<Kind>, buf: &'a mut Vec<u8>, delim: u8
-    ) -> (&'a [u8], Option<Symbol<'i, Kind>>) where 'i: 'a, 's: 'a {
+        &self, symbols: &'i SymbolMap, buf: &'a mut Vec<u8>, delim: u8
+    ) -> (&'a [u8], Option<Symbol<'i>>) where 'i: 'a, 's: 'a {
         unsafe {
             let spelling = self.spelling(buf);
             let Range { start: _, end } = spelling.as_ptr_range();
@@ -884,7 +892,7 @@ impl<'i, 's> Token<'i, 's> {
             }
 
             let slice = slice::from_raw_parts(suffix, end.offset_from(suffix) as usize);
-            let ident = symbols.intern(slice, Kind::Identifier);
+            let ident = symbols.intern(slice, kind(Kind::Identifier));
             (spelling, Some(ident))
         }
     }
@@ -937,7 +945,7 @@ impl<'i, 'a> Number<'i, 'a> {
 
 impl<'i, 'a> Character<'i, 'a> {
     #[inline]
-    pub fn suffix(&self) -> Option<Symbol<'i, Kind>> { self.suffix }
+    pub fn suffix(&self) -> Option<Symbol<'i>> { self.suffix }
 
     pub fn value(&self) -> (Option<Encoding>, bool, u64) {
         let Character { spelling, .. } = *self;
@@ -1040,7 +1048,7 @@ fn hex_value(d: u8) -> u8 {
 
 impl<'i, 'a> String<'i, 'a> {
     #[inline]
-    pub fn suffix(&self) -> Option<Symbol<'i, Kind>> { self.suffix }
+    pub fn suffix(&self) -> Option<Symbol<'i>> { self.suffix }
 }
 
 /// Write the spelling of the token in `ptr..end` to `buf`, without splices or UCNs.
