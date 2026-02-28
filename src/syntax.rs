@@ -1,4 +1,4 @@
-use crate::grammar::{Rules, VisitRules, VisitTerminals, Term};
+use crate::grammar::{Rules, VisitRules, VisitTerminals, Term, Def};
 
 pub struct Syntax;
 
@@ -1281,6 +1281,18 @@ impl Rules for Syntax {
         f.def(">>")
             .alt(("raw->", "adjacent->"))
         ;
+
+        let token_not_bracket = f.def("token-not-bracket");
+        self.walk_terminals(&mut TokenNotBracket { token_not_bracket });
+        struct TokenNotBracket<'a, V, T> { token_not_bracket: Def<'a, V, T> }
+        impl<V: VisitRules, T: Term + Clone> VisitTerminals for TokenNotBracket<'_, V, T> {
+            fn visit_terminal(&mut self, term: &[u8], _keyword: bool) {
+                for bracket in ["(", ")", "[", "]", "{", "}"] {
+                    if term == bracket.as_bytes() { return; }
+                }
+                self.token_not_bracket.alt(term);
+            }
+        }
     }
 
     fn walk_terminals(&self, f: &mut impl VisitTerminals) {
