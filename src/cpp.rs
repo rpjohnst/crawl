@@ -128,6 +128,7 @@ impl<'i, 's> Tokens<'i, 's> {
             let token = self.expanded_token(cpp, symbols, false);
             match token.token.kind() {
                 lex::Kind::EndOfFile => if let Some((conditionals, tokens)) = cpp.lexers.pop() {
+                    self.newline = true;
                     let conditionals = mem::replace(&mut self.conditionals, conditionals);
                     let _ = mem::replace(&mut self.tokens, tokens);
                     cpp.conditionals.truncate(conditionals);
@@ -263,6 +264,8 @@ impl<'i, 's> Tokens<'i, 's> {
         if self.conditionals == cpp.conditionals.len() {
             return;
         }
+
+        cpp.conditionals.pop().unwrap();
     }
 
     fn skip_groups(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
@@ -295,16 +298,16 @@ impl<'i, 's> Tokens<'i, 's> {
                 }
 
                 let mut token = self.expanded_token(cpp, symbols, true);
-                let value = match self.constant_expression(cpp, symbols, &mut token, true, 3) {
-                    Some(value) => { value }
-                    None => { continue; }
+                let active = match self.constant_expression(cpp, symbols, &mut token, true, 3) {
+                    Some(value) => { value.value != 0 }
+                    None => { false }
                 };
                 match token.token.kind() {
                     lex::Kind::EndOfLine => {}
                     _ => { self.discard_directive(cpp, symbols); continue; }
                 }
 
-                if value.value != 0 {
+                if active {
                     cpp.conditionals.last_mut().unwrap().taken = true;
                     return;
                 }
@@ -347,7 +350,6 @@ impl<'i, 's> Tokens<'i, 's> {
         token: &mut Token<'i, 's>, live: bool, precedence: u8
     ) -> Option<Value> {
         let mut left = match token.token.kind() {
-            lex::Kind::EndOfLine => { return None; }
             lex::Kind::Identifier => {
                 let ident = token.token.ident();
                 if ident == cpp.defined {
@@ -366,12 +368,8 @@ impl<'i, 's> Tokens<'i, 's> {
                     }
 
                     let name = match token.token.kind() {
-                        lex::Kind::EndOfLine => { return None; }
                         lex::Kind::Identifier => { token.token.ident() }
-                        _ => {
-                            self.discard_directive(cpp, symbols);
-                            return None;
-                        }
+                        _ => { return None; }
                     };
 
                     let unsigned = false;
@@ -380,12 +378,8 @@ impl<'i, 's> Tokens<'i, 's> {
                     if paren {
                         *token = self.unexpanded_token(cpp, symbols, true);
                         match token.token.kind() {
-                            lex::Kind::EndOfLine => { return None; }
                             lex::Kind::RightParen => {}
-                            _ => {
-                                self.discard_directive(cpp, symbols);
-                                return None;
-                            }
+                            _ => { return None; }
                         }
                     }
 
@@ -405,13 +399,9 @@ impl<'i, 's> Tokens<'i, 's> {
             lex::Kind::Number => {
                 let number = match token.token.number(symbols, &mut self.scratch) {
                     Some(number) => { number }
-                    None => {
-                        self.discard_directive(cpp, symbols);
-                        return None;
-                    }
+                    None => { return None; }
                 };
                 if number.float() {
-                    self.discard_directive(cpp, symbols);
                     return None;
                 }
                 if let Some(lex::Size::User(_)) = number.size() {
@@ -449,44 +439,43 @@ impl<'i, 's> Tokens<'i, 's> {
                 Value { unsigned, value }
             }
             lex::Kind::LeftParen => {
+                *token = self.expanded_token(cpp, symbols, true);
+
                 let value = self.constant_expression(cpp, symbols, token, live, 1)?;
 
                 match token.token.kind() {
-                    lex::Kind::EndOfLine => { return None; }
                     lex::Kind::RightParen => {}
-                    _ => {
-                        self.discard_directive(cpp, symbols);
-                        return None;
-                    }
+                    _ => { return None; }
                 }
 
                 *token = self.expanded_token(cpp, symbols, true);
                 value
             }
             lex::Kind::Plus => {
+                *token = self.expanded_token(cpp, symbols, true);
                 let value = self.constant_expression(cpp, symbols, token, live, 15)?;
                 value
             }
             lex::Kind::Minus => {
+                *token = self.expanded_token(cpp, symbols, true);
                 let mut value = self.constant_expression(cpp, symbols, token, live, 15)?;
                 value.value = -(value.value as i64) as u64;
                 value
             }
             lex::Kind::Tilde => {
+                *token = self.expanded_token(cpp, symbols, true);
                 let mut value = self.constant_expression(cpp, symbols, token, live, 15)?;
                 value.value = !value.value;
                 value
             }
             lex::Kind::Exclaim => {
+                *token = self.expanded_token(cpp, symbols, true);
                 let mut value = self.constant_expression(cpp, symbols, token, live, 15)?;
                 value.unsigned = false;
                 value.value = !(value.value != 0) as u64;
                 value
             }
-            _ => {
-                self.discard_directive(cpp, symbols);
-                return None;
-            }
+            _ => { return None; }
         };
 
         loop {
@@ -505,10 +494,7 @@ impl<'i, 's> Tokens<'i, 's> {
                 lex::Kind::Question => { 3 }
                 lex::Kind::Comma => { 1 }
                 lex::Kind::Colon | lex::Kind::RightParen | lex::Kind::EndOfLine => { 0 }
-                _ => {
-                    self.discard_directive(cpp, symbols);
-                    return None;
-                }
+                _ => { return None; }
             };
             if op < precedence { return Some(left); }
 
@@ -551,9 +537,6 @@ impl<'i, 's> Tokens<'i, 's> {
                         i64::wrapping_div(left.value as i64, right.value as i64) as u64
                     }
                 } else if live {
-                    if token.token.kind() != lex::Kind::EndOfLine {
-                        self.discard_directive(cpp, symbols);
-                    }
                     return None;
                 } else {
                     0
@@ -565,9 +548,6 @@ impl<'i, 's> Tokens<'i, 's> {
                         i64::wrapping_rem(left.value as i64, right.value as i64) as u64
                     }
                 } else if live {
-                    if token.token.kind() != lex::Kind::EndOfLine {
-                        self.discard_directive(cpp, symbols);
-                    }
                     return None;
                 } else {
                     0
@@ -612,12 +592,8 @@ impl<'i, 's> Tokens<'i, 's> {
                 lex::Kind::PipePipe => { (left.value != 0 || right.value != 0) as u64 }
                 lex::Kind::Question => {
                     match token.token.kind() {
-                        lex::Kind::EndOfLine => { return None; }
                         lex::Kind::Colon => {}
-                        _ => {
-                            self.discard_directive(cpp, symbols);
-                            return None;
-                        }
+                        _ => { return None; }
                     }
 
                     *token = self.expanded_token(cpp, symbols, true);
