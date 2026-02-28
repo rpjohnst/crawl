@@ -41,6 +41,8 @@ pub enum Kind {
 
     IntegerLiteral, CharacterLiteral, FloatLiteral, StringLiteral,
     UserIntegerLiteral, UserFloatLiteral, UserStringLiteral, UserCharacterLiteral,
+
+    AdjacentGt,
 }
 
 pub type SymbolMap<'u> = crate::symbols::SymbolMap<'u, (Kind, u8)>;

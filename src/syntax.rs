@@ -1265,6 +1265,22 @@ impl Rules for Syntax {
             .alt("identifier")
             .alt(("identifier-list", ",", "identifier"))
         ;
+
+        // Contextual keywords and operators
+
+        f.def("identifier")
+            .alt("raw-identifier")
+            .alt("final")
+            .alt("override")
+        ;
+
+        f.def(">")
+            .alt("raw->")
+            .alt("adjacent->")
+        ;
+        f.def(">>")
+            .alt(("raw->", "adjacent->"))
+        ;
     }
 
     fn walk_terminals(&self, f: &mut impl VisitTerminals) {
@@ -1275,7 +1291,7 @@ impl Rules for Syntax {
 
             .token("header-name")
 
-            .token("identifier").token("number").token("character").token("string")
+            .token("raw-identifier").token("number").token("character").token("string")
 
             .token("#").token("##")
 
@@ -1284,8 +1300,8 @@ impl Rules for Syntax {
             .token("?").token("::").token(".").token(".*").token("->").token("->*").token("~")
             .token("!").token("+").token("-").token("*").token("/").token("%").token("^").token("&").token("|")
             .token("=").token("+=").token("-=").token("*=").token("/=").token("%=").token("^=").token("&=").token("|=")
-            .token("==").token("!=").token("<").token(">").token("<=").token(">=").token("<=>").token("&&").token("||")
-            .token("<<").token(">>").token("<<=").token(">>=").token("++").token("--").token(",")
+            .token("==").token("!=").token("<").token("raw->").token("<=").token(">=").token("<=>").token("&&").token("||")
+            .token("<<").token("raw->>").token("<<=").token(">>=").token("++").token("--").token(",")
 
             .token("error")
         ;
@@ -1301,6 +1317,10 @@ impl Rules for Syntax {
             .token("user-defined-floating-point-literal")
             .token("user-defined-string-literal")
             .token("user-defined-character-literal")
+        ;
+
+        f
+            .token("adjacent->")
         ;
 
         f
@@ -1322,6 +1342,10 @@ impl Rules for Syntax {
             .keyword("typeid").keyword("typename").keyword("union").keyword("unsigned").keyword("using")
             .keyword("virtual").keyword("void").keyword("volatile").keyword("wchar_t").keyword("while")
             .token("import-keyword").token("module-keyword").token("export-keyword")
+        ;
+
+        f
+            .keyword("final").keyword("override")
         ;
     }
 }

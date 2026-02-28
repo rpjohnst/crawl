@@ -50,6 +50,11 @@ pub fn parse<'i, 'a, 's>(
                 }
             }
 
+            lex::Kind::GtGt => {
+                parse.parse(lex::Kind::Gt as usize);
+                lex::Kind::AdjacentGt as usize
+            }
+
             kind => { kind as usize }
         };
         parse.parse(terminal);
