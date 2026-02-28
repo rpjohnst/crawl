@@ -37,7 +37,7 @@ pub enum Kind {
 
     Error,
 
-    // Additional tokens produced in phase 7.
+    // Additional tokens produced in phase 6.
 
     IntegerLiteral, CharacterLiteral, FloatLiteral, StringLiteral,
     UserIntegerLiteral, UserFloatLiteral, UserStringLiteral, UserCharacterLiteral,

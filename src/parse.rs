@@ -3,7 +3,7 @@ use crate::earley::{Analysis, Parse};
 use crate::lex;
 use crate::cpp::Preprocessor;
 
-/// Translation phase 7 - convert pp-tokens to tokens and parse
+/// Translation phases 6-7 - convert pp-tokens to tokens and parse
 pub fn parse<'i, 'a, 's>(
     analysis: &'a Analysis,
     cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, tokens: lex::Tokens<'s>,

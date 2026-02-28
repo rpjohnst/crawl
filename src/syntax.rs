@@ -1282,6 +1282,20 @@ impl Rules for Syntax {
             .alt(("raw->", "adjacent->"))
         ;
 
+        // Translation phase 5 - string literal encoding and concatenation
+
+        f.def("string-literal")
+            .alt("raw-string-literal")
+            .alt(("string-literal", "raw-string-literal"))
+        ;
+
+        f.def("user-defined-string-literal")
+            .alt("raw-user-defined-string-literal")
+            .alt(("string-literal", "raw-user-defined-string-literal"))
+            .alt(("user-defined-string-literal", "raw-user-defined-string-literal"))
+            .alt(("user-defined-string-literal", "string-literal"))
+        ;
+
         let token_not_bracket = f.def("token-not-bracket");
         self.walk_terminals(&mut TokenNotBracket { token_not_bracket });
         struct TokenNotBracket<'a, V, T> { token_not_bracket: Def<'a, V, T> }
@@ -1324,10 +1338,10 @@ impl Rules for Syntax {
             .token("integer-literal")
             .token("character-literal")
             .token("floating-point-literal")
-            .token("string-literal")
+            .token("raw-string-literal")
             .token("user-defined-integer-literal")
             .token("user-defined-floating-point-literal")
-            .token("user-defined-string-literal")
+            .token("raw-user-defined-string-literal")
             .token("user-defined-character-literal")
         ;
 
