@@ -33,6 +33,7 @@ pub struct Preprocessor<'i, 's> {
     line: lex::Symbol<'i>,
     error: lex::Symbol<'i>,
     pragma: lex::Symbol<'i>,
+    pragma_op: lex::Symbol<'i>,
 
     va_args: lex::Symbol<'i>,
     va_opt: lex::Symbol<'i>,
@@ -155,6 +156,7 @@ impl<'i, 's> Preprocessor<'i, 's> {
         let line = symbols.intern(b"line", lex::kind(lex::Kind::Identifier));
         let error = symbols.intern(b"error", lex::kind(lex::Kind::Identifier));
         let pragma = symbols.intern(b"pragma", lex::kind(lex::Kind::Identifier));
+        let pragma_op = symbols.intern(b"_Pragma", lex::kind(lex::Kind::Identifier));
 
         let va_args = symbols.intern(b"__VA_ARGS__", lex::kind(lex::Kind::Identifier));
         let va_opt = symbols.intern(b"__VA_OPT__", lex::kind(lex::Kind::Identifier));
@@ -164,7 +166,7 @@ impl<'i, 's> Preprocessor<'i, 's> {
             conditionals, lexers, macros,
             if_, ifdef, ifndef, elif, else_, endif,
             defined, has_include, has_cpp_attribute, true_, false_,
-            include, define, undef, line, error, pragma,
+            include, define, undef, line, error, pragma, pragma_op,
             va_args, va_opt,
         }
     }
@@ -1008,6 +1010,7 @@ impl<'i, 's> Tokens<'i, 's> {
         loop {
             let mut token = self.unexpanded_token(cpp, symbols, horizontal);
             if self.try_replace_macro(cpp, symbols, &mut token, horizontal) { continue; }
+            if self.try_pragma(cpp, symbols, &mut token, horizontal) { continue; }
             break token;
         }
     }
@@ -1399,6 +1402,37 @@ impl<'i, 's> Tokens<'i, 's> {
         }
 
         Token { space, token, replace: true }
+    }
+
+    fn try_pragma(
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
+        token: &mut Token<'i, 's>, horizontal: bool
+    ) -> bool {
+        let name = match token.token.kind() {
+            lex::Kind::Identifier => { token.token.ident() }
+            _ => { return false; }
+        };
+        if name != cpp.pragma_op { return false; }
+
+        *token = self.expanded_token(cpp, symbols, horizontal);
+        match token.token.kind() {
+            lex::Kind::LeftParen => {}
+            _ => { return true; }
+        }
+
+        *token = self.expanded_token(cpp, symbols, horizontal);
+        match token.token.kind() {
+            lex::Kind::String => {}
+            _ => { return true; }
+        }
+
+        *token = self.expanded_token(cpp, symbols, horizontal);
+        match token.token.kind() {
+            lex::Kind::RightParen => {}
+            _ => { return true; }
+        }
+
+        true
     }
 }
 
