@@ -1,6 +1,7 @@
 use std::mem;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::lex;
 
@@ -20,7 +21,7 @@ pub struct Preprocessor<'i, 's> {
     endif: lex::Symbol<'i>,
 
     defined: lex::Symbol<'i>,
-    #[allow(unused)] has_include: lex::Symbol<'i>,
+    has_include: lex::Symbol<'i>,
     #[allow(unused)] has_cpp_attribute: lex::Symbol<'i>,
     true_: lex::Symbol<'i>,
     false_: lex::Symbol<'i>,
@@ -37,7 +38,8 @@ pub struct Preprocessor<'i, 's> {
 }
 
 pub trait Source {
-    fn lexer_for_header(&self, angle: bool, header: &[u8]) -> Option<lex::Tokens<'_>>;
+    fn find_header(&self, angle: bool, header: &[u8]) -> Option<&Path>;
+    fn lexer_for_header(&self, path: &Path) -> lex::Tokens<'_>;
     fn lexer_for_buffer(&self, buffer: &[u8]) -> lex::Tokens<'_>;
 }
 
@@ -385,6 +387,34 @@ impl<'i, 's> Tokens<'i, 's> {
 
                     *token = self.expanded_token(cpp, symbols, true);
                     Value { unsigned, value }
+                } else if ident == cpp.has_include {
+                    *token = self.expanded_token(cpp, symbols, true);
+                    match token.token.kind() {
+                        lex::Kind::LeftParen => {}
+                        _ => { return None; }
+                    }
+
+                    let mut scratch = Vec::default();
+                    let (angle, header) = match self.try_expanded_header_name(cpp, symbols, &mut scratch) {
+                        Ok(header) => { header }
+                        Err(error) => {
+                            let space = lex::Space { kind: lex::Shape::None, len: 0 };
+                            *token = Token { space, token: error, replace: true };
+                            return None;
+                        }
+                    };
+
+                    *token = self.expanded_token(cpp, symbols, true);
+                    match token.token.kind() {
+                        lex::Kind::RightParen => {}
+                        _ => { return None; }
+                    }
+
+                    let unsigned = false;
+                    let value = (live && cpp.source.find_header(angle, header).is_some()) as u64;
+
+                    *token = self.expanded_token(cpp, symbols, true);
+                    Value { unsigned, value }
                 } else if ident == cpp.true_ {
                     *token = self.expanded_token(cpp, symbols, true);
                     Value { unsigned: false, value: 1 }
@@ -617,44 +647,13 @@ impl<'i, 's> Tokens<'i, 's> {
     fn include_directive(
         &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap
     ) {
-        let space = self.tokens.whitespace(false);
-        if space.kind == lex::Shape::Newline { self.newline = true; }
-        self.offset += space.len;
-
-        if self.newline { return; }
-
         let mut scratch = Vec::default();
-        let name = if let Some(token) = self.tokens.try_header_name() {
-            self.newline = false;
-            self.offset += token.len();
-
-            token.spelling(&mut scratch)
-        } else {
-            let token = self.expanded_token(cpp, symbols, true);
-            match token.token.kind() {
+        let (angle, header) = match self.try_expanded_header_name(cpp, symbols, &mut scratch) {
+            Ok(header) => { header }
+            Err(token) => match token.kind() {
                 lex::Kind::EndOfLine => { return; }
-                lex::Kind::Lt => {
-                    token.token.write_spelling(&mut scratch);
-                    loop {
-                        let token = self.expanded_token(cpp, symbols, true);
-                        if token.token.kind() == lex::Kind::EndOfLine { return; }
-
-                        if token.space.kind != lex::Shape::None { scratch.push(b' '); }
-                        token.token.write_spelling(&mut scratch);
-
-                        if token.token.kind() == lex::Kind::Gt { break; }
-                    }
-                }
-                lex::Kind::String => { token.token.write_spelling(&mut scratch); }
                 _ => { return self.discard_directive(cpp, symbols); }
             }
-
-            &scratch[..]
-        };
-        let (angle, header) = match name[..] {
-            [b'<', ref header @ .., b'>'] if !header.is_empty() => { (true, header) }
-            [b'"', ref header @ .., b'"'] if !header.is_empty() => { (false, header) }
-            _ => { return; }
         };
 
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
@@ -663,14 +662,59 @@ impl<'i, 's> Tokens<'i, 's> {
             _ => { return self.discard_directive(cpp, symbols); }
         }
 
-        let tokens = match cpp.source.lexer_for_header(angle, header) {
-            Some(tokens) => { tokens }
+        let path = match cpp.source.find_header(angle, header) {
+            Some(path) => { path }
             None => { return; }
         };
+        let tokens = cpp.source.lexer_for_header(path);
 
         let conditionals = mem::replace(&mut self.conditionals, cpp.conditionals.len());
         let tokens = mem::replace(&mut self.tokens, tokens);
         cpp.lexers.push((conditionals, tokens));
+    }
+
+    fn try_expanded_header_name<'a>(
+        &mut self, cpp: &Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap,
+        scratch: &'a mut Vec<u8>
+    ) -> Result<(bool, &'a [u8]), lex::Token<'i, 's>> where 's: 'a {
+        let space = self.tokens.whitespace(false);
+        if space.kind == lex::Shape::Newline { self.newline = true; }
+        self.offset += space.len;
+
+        if self.newline { return Err(lex::Token::end_of_line()); }
+
+        let name = if let Some(token) = self.tokens.try_header_name() {
+            self.newline = false;
+            self.offset += token.len();
+
+            token.spelling(scratch)
+        } else {
+            let token = self.expanded_token(cpp, symbols, true);
+            match token.token.kind() {
+                lex::Kind::Lt => {
+                    token.token.write_spelling(scratch);
+                    loop {
+                        let token = self.expanded_token(cpp, symbols, true);
+                        if token.token.kind() == lex::Kind::EndOfLine { return Err(token.token); }
+
+                        if token.space.kind != lex::Shape::None { scratch.push(b' '); }
+                        token.token.write_spelling(scratch);
+
+                        if token.token.kind() == lex::Kind::Gt { break; }
+                    }
+                }
+                lex::Kind::String => { token.token.write_spelling(scratch); }
+                _ => { return Err(token.token); }
+            }
+
+            &scratch[..]
+        };
+        let (angle, header) = match name[..] {
+            [b'<', ref header @ .., b'>'] if !header.is_empty() => { (true, header) }
+            [b'"', ref header @ .., b'"'] if !header.is_empty() => { (false, header) }
+            _ => { return Err(lex::Token::error(b"")); }
+        };
+        Ok((angle, header))
     }
 
     fn define_directive(
@@ -1279,7 +1323,12 @@ impl<'i, 's> Tokens<'i, 's> {
 pub struct ScratchBuffers { arena: quickdry::Arena }
 
 impl Source for ScratchBuffers {
-    fn lexer_for_header(&self, _: bool, _: &[u8]) -> Option<lex::Tokens<'_>> { None }
+    fn find_header(&self, _: bool, _: &[u8]) -> Option<&Path> { Some(Path::new("")) }
+
+    fn lexer_for_header(&self, _: &Path) -> lex::Tokens<'_> {
+        lex::Tokens::from_bytes_with_padding(b"\0\0\0").unwrap()
+    }
+
     fn lexer_for_buffer(&self, buffer: &[u8]) -> lex::Tokens<'_> {
         use std::{ptr, slice};
         use std::alloc::{Layout, handle_alloc_error};
