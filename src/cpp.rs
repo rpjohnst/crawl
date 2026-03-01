@@ -8,9 +8,10 @@ use crate::lex;
 /// Translation phase 4 - preprocessing directives and macro expansion
 pub struct Preprocessor<'i, 's> {
     source: &'s dyn Source,
+    guards: HashMap<&'s Path, lex::Symbol<'i>>,
 
     conditionals: Vec<Conditional>,
-    lexers: Vec<(usize, lex::Tokens<'s>)>,
+    lexers: Vec<(usize, Guard<'i, 's>, lex::Tokens<'s>)>,
     macros: HashMap<lex::Symbol<'i>, Macro<'i, 's>>,
 
     if_: lex::Symbol<'i>,
@@ -66,14 +67,71 @@ pub struct Tokens<'i, 's> {
     buffer: Vec<Token<'i, 's>>,
 
     conditionals: usize,
+    guard: Guard<'i, 's>,
     tokens: lex::Tokens<'s>,
     scratch: Vec<u8>,
+}
+
+enum Guard<'i, 's> {
+    Open(&'s Path),
+    Directive(&'s Path),
+    IfNDef(&'s Path, lex::Symbol<'i>),
+    EndIf(&'s Path, lex::Symbol<'i>),
+    None,
+}
+
+impl<'i> Guard<'i, '_> {
+    fn token(&mut self, kind: lex::Kind) {
+        match *self {
+            Guard::Open(name) if kind == lex::Kind::Hash => { *self = Guard::Directive(name); }
+            Guard::Open(..) => { *self = Guard::None; }
+            Guard::EndIf(..) if kind != lex::Kind::EndOfFile => { *self = Guard::None; }
+            _ => {}
+        }
+    }
+
+    fn directive(&mut self) {
+        match *self {
+            Guard::Directive(..) => { *self = Guard::None; }
+            _ => {}
+        }
+    }
+
+    fn replace(&mut self) {
+        match *self {
+            Guard::Directive(..) => { *self = Guard::None; }
+            _ => {}
+        }
+    }
+
+    fn ifndef(&mut self, token: lex::Token<'i, '_>, active: bool) {
+        match *self {
+            Guard::Directive(name) if active => { *self = Guard::IfNDef(name, token.ident()); }
+            _ => {}
+        }
+    }
+
+    fn else_(&mut self) {
+        match *self {
+            Guard::IfNDef(..) => { *self = Guard::None; }
+            _ => {}
+        }
+    }
+
+    fn endif(&mut self) {
+        match *self {
+            Guard::IfNDef(name, ident) => { *self = Guard::EndIf(name, ident); }
+            _ => {}
+        }
+    }
 }
 
 struct Invoked<'i> { name: lex::Symbol<'i>, begin: usize }
 
 impl<'i, 's> Preprocessor<'i, 's> {
     pub fn new(symbols: &'i lex::SymbolMap, source: &'s dyn Source) -> Preprocessor<'i, 's> {
+        let guards = HashMap::default();
+
         let conditionals = Vec::default();
         let lexers = Vec::default();
         let macros = HashMap::default();
@@ -102,7 +160,7 @@ impl<'i, 's> Preprocessor<'i, 's> {
         let va_opt = symbols.intern(b"__VA_OPT__", lex::kind(lex::Kind::Identifier));
 
         Preprocessor {
-            source,
+            source, guards,
             conditionals, lexers, macros,
             if_, ifdef, ifndef, elif, else_, endif,
             defined, has_include, has_cpp_attribute, true_, false_,
@@ -112,13 +170,17 @@ impl<'i, 's> Preprocessor<'i, 's> {
     }
 
     pub fn tokens(&self, tokens: lex::Tokens<'s>) -> Tokens<'i, 's> {
+        let newline = true;
+        let offset = 0;
+
         let macros = Vec::default();
         let buffer = Vec::default();
 
         let conditionals = self.conditionals.len();
+        let guard = Guard::None;
         let scratch = Vec::default();
 
-        Tokens { newline: true, offset: 0, macros, buffer, conditionals, tokens, scratch }
+        Tokens { newline, offset, macros, buffer, conditionals, guard, tokens, scratch }
     }
 }
 
@@ -129,9 +191,13 @@ impl<'i, 's> Tokens<'i, 's> {
         loop {
             let token = self.expanded_token(cpp, symbols, false);
             match token.token.kind() {
-                lex::Kind::EndOfFile => if let Some((conditionals, tokens)) = cpp.lexers.pop() {
+                lex::Kind::EndOfFile => if let Some((conditionals, guard, tokens)) = cpp.lexers.pop() {
                     self.newline = true;
+                    if let Guard::EndIf(name, ident) = self.guard {
+                        cpp.guards.insert(name, ident);
+                    }
                     let conditionals = mem::replace(&mut self.conditionals, conditionals);
+                    let _ = mem::replace(&mut self.guard, guard);
                     let _ = mem::replace(&mut self.tokens, tokens);
                     cpp.conditionals.truncate(conditionals);
                     continue;
@@ -153,36 +219,41 @@ impl<'i, 's> Tokens<'i, 's> {
         let ident = match token.kind() {
             lex::Kind::EndOfLine => { return; }
             lex::Kind::Identifier => { token.ident() }
-            _ => { return self.discard_directive(cpp, symbols); }
+            _ => {
+                self.guard.directive();
+                return self.discard_directive(cpp, symbols);
+            }
         };
 
         if ident == cpp.if_ {
-            return self.if_directive(cpp, symbols);
+            self.if_directive(cpp, symbols);
         } else if ident == cpp.ifdef {
-            return self.ifdef_directive(cpp, symbols, true);
+            self.ifdef_directive(cpp, symbols, true);
         } else if ident == cpp.ifndef {
-            return self.ifdef_directive(cpp, symbols, false);
+            self.ifdef_directive(cpp, symbols, false);
         } else if ident == cpp.elif {
-            return self.elif_directive(cpp, symbols);
+            self.elif_directive(cpp, symbols);
         } else if ident == cpp.else_ {
-            return self.else_directive(cpp, symbols);
+            self.else_directive(cpp, symbols);
         } else if ident == cpp.endif {
-            return self.endif_directive(cpp, symbols);
+            self.endif_directive(cpp, symbols);
         } else if ident == cpp.include {
-            return self.include_directive(cpp, symbols);
+            self.include_directive(cpp, symbols);
         } else if ident == cpp.define {
-            return self.define_directive(cpp, symbols);
+            self.define_directive(cpp, symbols);
         } else if ident == cpp.undef {
-            return self.undef_directive(cpp, symbols);
+            self.undef_directive(cpp, symbols);
         } else if ident == cpp.line {
-            return self.line_directive(cpp, symbols);
+            self.line_directive(cpp, symbols);
         } else if ident == cpp.error {
-            return self.error_directive(cpp, symbols);
+            self.error_directive(cpp, symbols);
         } else if ident == cpp.pragma {
-            return self.pragma_directive(cpp, symbols);
+            self.pragma_directive(cpp, symbols);
         } else {
-            return self.discard_directive(cpp, symbols);
+            self.discard_directive(cpp, symbols);
         }
+
+        self.guard.directive();
     }
 
     fn if_directive(&mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap) {
@@ -206,6 +277,7 @@ impl<'i, 's> Tokens<'i, 's> {
         &mut self, cpp: &mut Preprocessor<'i, 's>, symbols: &'i lex::SymbolMap, positive: bool
     ) {
         let Token { token, .. } = self.unexpanded_token(cpp, symbols, true);
+        let name = token;
         let mut active = match token.kind() {
             lex::Kind::EndOfLine => { false }
             lex::Kind::Identifier => { cpp.macros.contains_key(&token.ident()) }
@@ -217,7 +289,10 @@ impl<'i, 's> Tokens<'i, 's> {
             _ => { self.discard_directive(cpp, symbols); }
         }
 
-        if !positive { active = !active; }
+        if !positive {
+            active = !active;
+            self.guard.ifndef(name, active);
+        }
         cpp.conditionals.push(Conditional { live: true, taken: active, has_else: false });
         if active { return; }
 
@@ -233,6 +308,7 @@ impl<'i, 's> Tokens<'i, 's> {
             return;
         }
 
+        if self.conditionals + 1 == cpp.conditionals.len() { self.guard.else_(); }
         self.skip_groups(cpp, symbols);
     }
 
@@ -251,6 +327,7 @@ impl<'i, 's> Tokens<'i, 's> {
         let conditional = cpp.conditionals.last_mut().unwrap();
         conditional.has_else = true;
 
+        if self.conditionals + 1 == cpp.conditionals.len() { self.guard.else_(); }
         self.skip_groups(cpp, symbols);
     }
 
@@ -267,6 +344,7 @@ impl<'i, 's> Tokens<'i, 's> {
             return;
         }
 
+        if self.conditionals + 1 == cpp.conditionals.len() { self.guard.endif(); }
         cpp.conditionals.pop().unwrap();
     }
 
@@ -666,11 +744,15 @@ impl<'i, 's> Tokens<'i, 's> {
             Some(path) => { path }
             None => { return; }
         };
+        if let Some(ident) = cpp.guards.get(path) {
+            if cpp.macros.contains_key(&ident) { return; }
+        }
         let tokens = cpp.source.lexer_for_header(path);
 
         let conditionals = mem::replace(&mut self.conditionals, cpp.conditionals.len());
+        let guard = mem::replace(&mut self.guard, Guard::Open(path));
         let tokens = mem::replace(&mut self.tokens, tokens);
-        cpp.lexers.push((conditionals, tokens));
+        cpp.lexers.push((conditionals, guard, tokens));
     }
 
     fn try_expanded_header_name<'a>(
@@ -961,6 +1043,7 @@ impl<'i, 's> Tokens<'i, 's> {
             self.newline = false;
             self.offset += token.len();
 
+            self.guard.token(token.kind());
             Token { space, token, replace: true }
         }
     }
@@ -1013,6 +1096,7 @@ impl<'i, 's> Tokens<'i, 's> {
         };
         if definition.active.get() { token.replace = false; }
         if !token.replace { return false; }
+        self.guard.replace();
 
         let mut tokens = Vec::default();
         let mut arguments = Vec::default();
